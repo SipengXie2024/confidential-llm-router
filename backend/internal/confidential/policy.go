@@ -9,8 +9,8 @@ type ProviderPolicy struct {
 	ProviderID       ProviderID
 	EndpointPolicyID EndpointPolicyID
 	BaseURL          string
+	Path             string   // canonical upstream path; the host/client cannot choose it (goal①)
 	AllowedHosts     []string // exact SNI/host pins
-	PathPrefixes     []string // allowed upstream path prefixes
 }
 
 func (p ProviderPolicy) AllowsHost(h string) bool {
@@ -27,8 +27,8 @@ var policies = map[string]ProviderPolicy{
 		ProviderID:       "openai",
 		EndpointPolicyID: "openai-responses",
 		BaseURL:          "https://api.openai.com",
+		Path:             "/v1/responses",
 		AllowedHosts:     []string{"api.openai.com"},
-		PathPrefixes:     []string{"/v1/responses", "/v1/chat/completions"},
 	},
 }
 

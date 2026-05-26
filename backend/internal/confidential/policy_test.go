@@ -12,6 +12,9 @@ func TestProviderPolicyResolveOpenAI(t *testing.T) {
 	if p.BaseURL != "https://api.openai.com" {
 		t.Fatalf("bad base url %q", p.BaseURL)
 	}
+	if p.Path != "/v1/responses" {
+		t.Fatalf("bad path %q", p.Path)
+	}
 	if !p.AllowsHost("api.openai.com") || p.AllowsHost("evil.example.com") {
 		t.Fatal("host allowlist wrong")
 	}
