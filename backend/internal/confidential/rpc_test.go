@@ -28,7 +28,7 @@ func TestRPCRoundTrip(t *testing.T) {
 	h := &stubHandler{auth: AuthorizeResult{Allowed: true, AccountID: 7, ProviderID: "openai", EndpointPolicyID: "openai-responses", Model: "gpt-5.3-codex", Credential: "sk-x"}}
 	go Serve(c2, h)
 	caller := NewCaller(c1)
-	res, err := caller.AuthorizeAndSelect(context.Background(), "keyhash", RoutingNeeds{Model: "gpt-5.3-codex", Platform: "openai"}, nil)
+	res, err := caller.AuthorizeAndSelect(context.Background(), "sk-userkey", RoutingNeeds{Model: "gpt-5.3-codex", Platform: "openai"}, nil)
 	if err != nil || !res.Allowed || res.AccountID != 7 || res.Credential != "sk-x" {
 		t.Fatalf("auth result wrong: %+v err=%v", res, err)
 	}

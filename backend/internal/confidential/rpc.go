@@ -20,10 +20,11 @@ const (
 )
 
 // Handler is implemented on the host side (orchestrator) and invoked over vsock by the
-// enclave. It sees only the key hash plus non-secret routing metadata and returns the
-// selected account + plaintext credential (goal③ credential-isolation deferred).
+// enclave. apiKey is the gateway-issued user key relayed verbatim (the host issued it and
+// stores it, so there is nothing to hide); the host authenticates it and returns the
+// selected account + plaintext provider credential (goal③ credential-isolation deferred).
 type Handler interface {
-	AuthorizeAndSelect(ctx context.Context, keyHash string, n RoutingNeeds, priorFailures []int64) (AuthorizeResult, error)
+	AuthorizeAndSelect(ctx context.Context, apiKey string, n RoutingNeeds, priorFailures []int64) (AuthorizeResult, error)
 	RecordUsage(ctx context.Context, u UsageTelemetry) error
 }
 
@@ -39,7 +40,7 @@ type rpcReply struct {
 }
 
 type authorizeArgs struct {
-	KeyHash       string       `json:"key_hash"`
+	APIKey        string       `json:"api_key"`
 	Needs         RoutingNeeds `json:"needs"`
 	PriorFailures []int64      `json:"prior_failures,omitempty"`
 }
@@ -111,9 +112,9 @@ func (c *Caller) call(method string, args any, out any) error {
 	return nil
 }
 
-func (c *Caller) AuthorizeAndSelect(_ context.Context, keyHash string, n RoutingNeeds, priorFailures []int64) (AuthorizeResult, error) {
+func (c *Caller) AuthorizeAndSelect(_ context.Context, apiKey string, n RoutingNeeds, priorFailures []int64) (AuthorizeResult, error) {
 	var res AuthorizeResult
-	err := c.call(methodAuthorizeAndSelect, authorizeArgs{KeyHash: keyHash, Needs: n, PriorFailures: priorFailures}, &res)
+	err := c.call(methodAuthorizeAndSelect, authorizeArgs{APIKey: apiKey, Needs: n, PriorFailures: priorFailures}, &res)
 	return res, err
 }
 
@@ -146,7 +147,7 @@ func dispatch(ctx context.Context, h Handler, req rpcRequest) rpcReply {
 		if err := json.Unmarshal(req.Payload, &args); err != nil {
 			return rpcReply{Error: err.Error()}
 		}
-		res, err := h.AuthorizeAndSelect(ctx, args.KeyHash, args.Needs, args.PriorFailures)
+		res, err := h.AuthorizeAndSelect(ctx, args.APIKey, args.Needs, args.PriorFailures)
 		if err != nil {
 			return rpcReply{Error: err.Error()}
 		}
