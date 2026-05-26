@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +16,9 @@ import (
 )
 
 type stubOrchestrator struct {
-	auth      confidential.AuthorizeResult
-	lastUsage confidential.UsageTelemetry
+	auth        confidential.AuthorizeResult
+	lastUsage   confidential.UsageTelemetry
+	recordCalls int
 }
 
 func (s *stubOrchestrator) AuthorizeAndSelect(_ context.Context, _ string, _ confidential.RoutingNeeds, _ []int64) (confidential.AuthorizeResult, error) {
@@ -25,6 +27,7 @@ func (s *stubOrchestrator) AuthorizeAndSelect(_ context.Context, _ string, _ con
 
 func (s *stubOrchestrator) RecordUsage(_ context.Context, u confidential.UsageTelemetry) error {
 	s.lastUsage = u
+	s.recordCalls++
 	return nil
 }
 
@@ -114,5 +117,60 @@ func TestExtractAPIKey(t *testing.T) {
 	h2.Set("x-api-key", "sk-xyz")
 	if got := extractAPIKey(h2); got != "sk-xyz" {
 		t.Fatalf("x-api-key: got %q", got)
+	}
+}
+
+func TestEnclaveCorePreDispatchErrorReturns502(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	stub := &stubOrchestrator{auth: confidential.AuthorizeResult{
+		Allowed: true, AccountID: 5, ProviderID: "openai",
+		EndpointPolicyID: "openai-responses", Model: "gpt-5.3-codex", Credential: "sk-acct",
+	}}
+	go confidential.Serve(c2, stub)
+	caller := confidential.NewCaller(c1)
+
+	app := &App{
+		platform: "openai",
+		dial:     func(context.Context) (rpcClient, func(), error) { return caller, func() {}, nil },
+		// forward fails before writing any header/body (e.g. policy or dispatch error).
+		forward: func(_ context.Context, _ confidential.SelectedForwardRequest, _ enclave.ResponseSink) (confidential.UsageTelemetry, error) {
+			return confidential.UsageTelemetry{}, errors.New("dispatch failed")
+		},
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m"}`))
+	r.Header.Set("Authorization", "Bearer sk-userkey")
+	rec := httptest.NewRecorder()
+
+	app.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("pre-dispatch forward error must return 502, got %d", rec.Code)
+	}
+	if stub.recordCalls != 0 {
+		t.Fatalf("RecordUsage must not run on a pre-dispatch failure, calls=%d", stub.recordCalls)
+	}
+}
+
+func TestEnclaveCoreRejectsOversizeBody(t *testing.T) {
+	app := &App{
+		platform: "openai",
+		maxBody:  10,
+		dial: func(context.Context) (rpcClient, func(), error) {
+			t.Fatal("dial must not run for an oversize body")
+			return nil, nil, nil
+		},
+		forward: func(_ context.Context, _ confidential.SelectedForwardRequest, _ enclave.ResponseSink) (confidential.UsageTelemetry, error) {
+			t.Fatal("forward must not run for an oversize body")
+			return confidential.UsageTelemetry{}, nil
+		},
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(strings.Repeat("x", 20)))
+	rec := httptest.NewRecorder()
+
+	app.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize body must return 413, got %d", rec.Code)
 	}
 }

@@ -7,8 +7,8 @@ import (
 )
 
 // KeyAuthenticator authenticates a gateway-issued user API key and resolves its group.
-// The real implementation (cmd/host-orchestrator) wraps service.APIKeyService.ValidateKey;
-// the key is relayed verbatim because the host issued and stores it.
+// The real implementation on the host wraps service.APIKeyService.ValidateKey; the key is
+// relayed verbatim because the host issued and stores it.
 type KeyAuthenticator interface {
 	Authenticate(ctx context.Context, apiKey string) (KeyAuth, bool, error)
 }
@@ -46,7 +46,7 @@ type UsageRecorder interface {
 // Service implements confidential.Handler on the host: authenticate the relayed user key,
 // enforce the MVP single-platform constraint, select an account on non-secret metadata,
 // and record usage. It holds no gin and no datastore — those live behind the injected
-// interfaces, wired to the real services in cmd/host-orchestrator.
+// interfaces, wired to the real services in the host binary.
 type Service struct {
 	keys     KeyAuthenticator
 	selector AccountSelector
@@ -67,6 +67,8 @@ func (s *Service) AuthorizeAndSelect(ctx context.Context, apiKey string, n confi
 	if !ok {
 		return confidential.AuthorizeResult{Allowed: false, DenyReason: "invalid api key"}, nil
 	}
+	// Platform is taken from the authenticated key (host-authoritative); the
+	// enclave-supplied RoutingNeeds.Platform is informational and intentionally not trusted.
 	if auth.Platform != "openai" {
 		return confidential.AuthorizeResult{Allowed: false, DenyReason: "unsupported platform: " + auth.Platform}, nil
 	}

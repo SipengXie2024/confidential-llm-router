@@ -36,14 +36,23 @@ type forwardFunc func(context.Context, confidential.SelectedForwardRequest, encl
 // path is testable without a live vsock connection or a real upstream.
 type App struct {
 	platform string
+	maxBody  int // request body cap; <=0 uses maxRequestBody
 	dial     func(ctx context.Context) (rpcClient, func(), error)
 	forward  forwardFunc
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
+	limit := a.maxBody
+	if limit <= 0 {
+		limit = maxRequestBody
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(limit)+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read request body")
+		return
+	}
+	if len(body) > limit {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds limit")
 		return
 	}
 	needs := confidential.RoutingNeeds{
@@ -59,6 +68,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
+	// priorFailures is nil: the MVP forwards once. Enclave-driven failover (re-select on
+	// upstream failure) is future work.
 	auth, err := client.AuthorizeAndSelect(r.Context(), extractAPIKey(r.Header), needs, nil)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authorize: "+err.Error())
@@ -83,13 +94,43 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Body:             body,
 		Headers:          r.Header,
 	}
-	usage, ferr := a.forward(r.Context(), req, enclave.NewHTTPSink(w))
+	tw := &headerTracker{ResponseWriter: w}
+	usage, ferr := a.forward(r.Context(), req, enclave.NewHTTPSink(tw))
+	if ferr != nil && !tw.wrote {
+		// Pre-dispatch failure (policy/build/connect): nothing reached the upstream or the
+		// client and no tokens were consumed, so emit an error and skip usage.
+		writeError(w, http.StatusBadGateway, "upstream: "+ferr.Error())
+		return
+	}
 	if ferr != nil {
-		// Status + partial body are already on the wire; only logging is left.
-		log.Printf("enclave-core: forward error (account=%d): %v", auth.AccountID, ferr)
+		// Mid-stream failure: status + partial body already sent; record partial usage.
+		log.Printf("enclave-core: forward error after headers (account=%d): %v", auth.AccountID, ferr)
 	}
 	if err := client.RecordUsage(r.Context(), usage); err != nil {
 		log.Printf("enclave-core: record usage failed (account=%d): %v", auth.AccountID, err)
+	}
+}
+
+// headerTracker reports whether ForwardSelected already sent a status line, so a
+// pre-dispatch error can return a clean error instead of an implicit empty 200.
+type headerTracker struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (t *headerTracker) WriteHeader(code int) {
+	t.wrote = true
+	t.ResponseWriter.WriteHeader(code)
+}
+
+func (t *headerTracker) Write(b []byte) (int, error) {
+	t.wrote = true
+	return t.ResponseWriter.Write(b)
+}
+
+func (t *headerTracker) Flush() {
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
@@ -151,7 +192,7 @@ func main() {
 func signalReady(intPort uint) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/enclave/ready", intPort)
 	client := &http.Client{Timeout: 3 * time.Second}
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 		if err != nil {
 			return
