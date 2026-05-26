@@ -110,3 +110,65 @@ func TestForwardSelectedRejectsDisallowedHost(t *testing.T) {
 		t.Fatalf("expected allowlist error, got: %v", err)
 	}
 }
+
+func TestForwardSelectedNonSSEVerbatim(t *testing.T) {
+	const jsonBody = `{"id":"resp_1","usage":{"input_tokens":3,"output_tokens":4}}`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, jsonBody)
+	}))
+	defer ts.Close()
+
+	req := confidential.SelectedForwardRequest{
+		ProviderID: "openai", EndpointPolicyID: "openai-responses",
+		AccountID: 7, Model: "gpt-5.3-codex", Credential: "sk-test", Body: []byte("{}"),
+	}
+	rec := httptest.NewRecorder()
+	cfg := forwardConfig{
+		client: ts.Client(),
+		policyOverride: &confidential.ProviderPolicy{
+			ProviderID: "openai", EndpointPolicyID: "openai-responses",
+			BaseURL: ts.URL, Path: "/v1/responses",
+			AllowedHosts: []string{mustHost(t, ts.URL)},
+		},
+	}
+	tel, err := forwardSelected(context.Background(), req, NewHTTPSink(rec), cfg)
+	if err != nil {
+		t.Fatalf("forwardSelected: %v", err)
+	}
+	if rec.Body.String() != jsonBody {
+		t.Fatalf("non-SSE body not verbatim:\n got %q\nwant %q", rec.Body.String(), jsonBody)
+	}
+	if tel.InputTokens != 3 || tel.OutputTokens != 4 {
+		t.Fatalf("usage = %+v, want input=3 output=4", tel)
+	}
+}
+
+func TestForwardSelectedStreamErrorPropagates(t *testing.T) {
+	// A single SSE line larger than maxSSELine must surface as an error, not a silent
+	// success with partial telemetry.
+	huge := "data: " + strings.Repeat("a", maxSSELine+16) + "\n"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, huge)
+	}))
+	defer ts.Close()
+
+	req := confidential.SelectedForwardRequest{
+		ProviderID: "openai", EndpointPolicyID: "openai-responses",
+		Model: "gpt-5.3-codex", Credential: "sk-test", Body: []byte("{}"),
+	}
+	cfg := forwardConfig{
+		client: ts.Client(),
+		policyOverride: &confidential.ProviderPolicy{
+			ProviderID: "openai", EndpointPolicyID: "openai-responses",
+			BaseURL: ts.URL, Path: "/v1/responses",
+			AllowedHosts: []string{mustHost(t, ts.URL)},
+		},
+	}
+	if _, err := forwardSelected(context.Background(), req, NewHTTPSink(httptest.NewRecorder()), cfg); err == nil {
+		t.Fatal("expected error when upstream SSE line exceeds the scan limit")
+	}
+}

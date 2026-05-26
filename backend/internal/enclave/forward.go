@@ -32,8 +32,11 @@ var allowedPassthroughHeaders = map[string]bool{
 	"x-codex-turn-metadata": true,
 }
 
-// maxSSELine bounds a single SSE line read from the upstream response.
-const maxSSELine = 1 << 20
+// maxSSELine bounds a single SSE line; maxResponseBody bounds a buffered non-SSE body.
+const (
+	maxSSELine      = 1 << 20
+	maxResponseBody = 64 << 20
+)
 
 // forwardConfig injects test seams. In production both fields are zero: ForwardSelected
 // resolves the baked-in policy and builds an SSRF-guarded client. Tests inject a client
@@ -103,13 +106,13 @@ func forwardSelected(ctx context.Context, req confidential.SelectedForwardReques
 	tel.Status = resp.StatusCode
 
 	relayResponseHeaders(resp, sink)
-	parsedUsage := relayBody(resp.Body, sink)
+	usage, relayErr := relayResponse(resp, sink)
 	sink.Close()
 
-	tel.InputTokens = parsedUsage.input
-	tel.OutputTokens = parsedUsage.output
+	tel.InputTokens = usage.input
+	tel.OutputTokens = usage.output
 	tel.LatencyMS = time.Since(start).Milliseconds()
-	return tel, nil
+	return tel, relayErr
 }
 
 func resolvePolicy(req confidential.SelectedForwardRequest, cfg forwardConfig) (confidential.ProviderPolicy, error) {
@@ -124,20 +127,39 @@ func resolvePolicy(req confidential.SelectedForwardRequest, cfg forwardConfig) (
 }
 
 func resolveClient(cfg forwardConfig) (*http.Client, error) {
-	if cfg.client != nil {
-		return cfg.client, nil
+	base := cfg.client
+	if base == nil {
+		// Streaming responses: no overall client timeout. ValidateResolvedIP guards
+		// against DNS-rebinding even though the host is policy-pinned.
+		c, err := httpclient.GetClient(httpclient.Options{
+			ValidateResolvedIP: true,
+			AllowPrivateHosts:  false,
+		})
+		if err != nil {
+			return nil, err
+		}
+		base = c
 	}
-	// Streaming responses: no overall client timeout. ValidateResolvedIP guards against
-	// DNS-rebinding even though the host is policy-pinned.
-	return httpclient.GetClient(httpclient.Options{
-		ValidateResolvedIP: true,
-		AllowPrivateHosts:  false,
-	})
+	// Shallow-copy so CheckRedirect can be pinned without mutating the shared pooled
+	// client (the Transport is intentionally still shared for connection reuse). The
+	// destination is policy-fixed; following a redirect would replay the plaintext body
+	// to an off-policy host (goal①), so refuse to follow and pass the 3xx through.
+	client := *base
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client, nil
 }
 
 func relayResponseHeaders(resp *http.Response, sink ResponseSink) {
 	headers := make(map[string][]string, len(resp.Header))
 	for k, v := range resp.Header {
+		switch http.CanonicalHeaderKey(k) {
+		case "Content-Length", "Transfer-Encoding":
+			// Body framing is re-derived by the sink's HTTP server; the relayed body
+			// length may differ from upstream (SSE) so a copied Content-Length would lie.
+			continue
+		}
 		headers[k] = v
 	}
 	sink.WriteHeader(resp.StatusCode, headers)
@@ -148,11 +170,24 @@ type usageCounts struct {
 	output int64
 }
 
-// relayBody streams the upstream response to the sink line-by-line (verbatim for
-// LF-delimited SSE, matching the host gateway's relay) and extracts usage from terminal
-// events. A sink write error means the client disconnected; we keep draining upstream so
-// usage telemetry is still collected for the host's billing.
-func relayBody(body io.Reader, sink ResponseSink) usageCounts {
+// relayResponse streams the upstream response to the sink and extracts usage. SSE
+// (text/event-stream) is relayed line-by-line with usage taken from terminal events;
+// any other content type (JSON errors, or stream:false responses) is copied byte-for-byte
+// and usage is parsed from the whole body. A non-nil error means the upstream stream
+// failed mid-flight — the client may already have received a partial 200 response, so the
+// caller should treat the telemetry as incomplete.
+func relayResponse(resp *http.Response, sink ResponseSink) (usageCounts, error) {
+	if isEventStream(resp.Header) {
+		return relaySSE(resp.Body, sink)
+	}
+	return relayVerbatim(resp.Body, sink)
+}
+
+func isEventStream(h http.Header) bool {
+	return strings.Contains(strings.ToLower(h.Get("Content-Type")), "text/event-stream")
+}
+
+func relaySSE(body io.Reader, sink ResponseSink) (usageCounts, error) {
 	var usage usageCounts
 	clientGone := false
 	scanner := bufio.NewScanner(body)
@@ -171,7 +206,23 @@ func relayBody(body io.Reader, sink ResponseSink) usageCounts {
 			parseSSEUsage(data, &usage)
 		}
 	}
-	return usage
+	if err := scanner.Err(); err != nil {
+		return usage, fmt.Errorf("upstream stream read: %w", err)
+	}
+	return usage, nil
+}
+
+func relayVerbatim(body io.Reader, sink ResponseSink) (usageCounts, error) {
+	buf, err := io.ReadAll(io.LimitReader(body, maxResponseBody))
+	var usage usageCounts
+	if len(buf) > 0 {
+		_ = sink.WriteChunk(buf) // client disconnect is non-fatal; still parse usage for billing
+		extractUsageInto(buf, &usage)
+	}
+	if err != nil {
+		return usage, fmt.Errorf("upstream body read: %w", err)
+	}
+	return usage, nil
 }
 
 func extractSSEData(line []byte) ([]byte, bool) {
@@ -181,9 +232,10 @@ func extractSSEData(line []byte) ([]byte, bool) {
 	return bytes.TrimLeft(line[len("data:"):], " \t"), true
 }
 
-// parseSSEUsage mirrors OpenAIGatewayService.parseSSEUsageBytes: usage is only read from
-// terminal events, trying the top-level "usage" then "response.usage" object, and
-// input_tokens/output_tokens with prompt_tokens/completion_tokens fallbacks.
+// parseSSEUsage reads usage only from OpenAI terminal SSE events. It follows
+// OpenAIGatewayService.parseSSEUsageBytes for the gating + field paths, but deliberately
+// omits that function's len(data) < 72 fast-path (a perf shortcut, not semantics) and its
+// cache/image token fields (not part of MVP UsageTelemetry).
 func parseSSEUsage(data []byte, usage *usageCounts) {
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 		return
@@ -193,6 +245,12 @@ func parseSSEUsage(data []byte, usage *usageCounts) {
 	default:
 		return
 	}
+	extractUsageInto(data, usage)
+}
+
+// extractUsageInto reads the usage object (top-level "usage" then "response.usage") from
+// a JSON document, used for both terminal SSE events and non-SSE response bodies.
+func extractUsageInto(data []byte, usage *usageCounts) {
 	if !gjson.ValidBytes(data) {
 		return
 	}
