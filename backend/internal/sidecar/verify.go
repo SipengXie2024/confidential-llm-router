@@ -39,6 +39,12 @@ func certBoundInUserData(userData, certDER []byte) bool {
 // expectedPCR maps PCR index → expected hex; an all-zero PCR (debug-mode enclave) is
 // rejected. A non-nil error means the channel MUST NOT be trusted (fail closed).
 func Verify(doc []byte, expectedPCR map[int]string, nonce, certDER []byte) error {
+	if len(nonce) == 0 {
+		return fmt.Errorf("nonce must be non-empty (attestation replay protection)")
+	}
+	if _, ok := expectedPCR[0]; !ok {
+		return fmt.Errorf("expectedPCR must pin at least PCR0 (refusing to skip measurement verification)")
+	}
 	res, err := nitrite.Verify(doc, nitrite.VerifyOptions{CurrentTime: time.Now()})
 	if err != nil {
 		return fmt.Errorf("attestation signature verification failed: %w", err)
