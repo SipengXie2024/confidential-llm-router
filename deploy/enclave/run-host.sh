@@ -15,6 +15,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 BACKEND="$REPO/backend"
 
+# host-orchestrator builds the real sub2api services, so it needs the gateway env
+# (DATABASE_*/REDIS_*/DATA_DIR + secrets). Source the gitignored env if present.
+set -a
+[ -f "$REPO/deploy/.env" ] && . "$REPO/deploy/.env"
+set +a
+
 EIF="${EIF:-$HERE/router.eif}"
 VSOCK_PORT="${VSOCK_PORT:-9000}"
 ENCLAVE_CID="${ENCLAVE_CID:-16}"
@@ -33,14 +39,16 @@ echo ">> building host-orchestrator"
 (cd "$BACKEND" && go build -o "$HERE/host-orchestrator" ./cmd/host-orchestrator)
 
 echo ">> starting host-orchestrator (vsock port $VSOCK_PORT; needs config + Postgres + Redis)"
-"$HERE/host-orchestrator" -vsock-port "$VSOCK_PORT" &
+nohup "$HERE/host-orchestrator" -vsock-port "$VSOCK_PORT" >/tmp/cr-host-orchestrator.log 2>&1 &
 ORCH_PID=$!
+disown "$ORCH_PID" 2>/dev/null || true
 
 echo ">> starting gvproxy (vsock://:1024 + $NETSOCK)"
 rm -f "$NETSOCK"
-"$GVPROXY" -listen vsock://:1024 -listen "unix://$NETSOCK" &
+nohup "$GVPROXY" -listen vsock://:1024 -listen "unix://$NETSOCK" >/tmp/cr-gvproxy.log 2>&1 &
 GV_PID=$!
-sleep 1
+disown "$GV_PID" 2>/dev/null || true
+sleep 2
 
 echo ">> run-enclave (non-debug) cid=$ENCLAVE_CID cpu=$CPU_COUNT mem=${MEMORY_MIB}MiB"
 sudo -n nitro-cli run-enclave \

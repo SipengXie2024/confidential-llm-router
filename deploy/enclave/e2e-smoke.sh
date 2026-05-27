@@ -21,9 +21,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 BACKEND="$REPO/backend"
 
-: "${GATEWAY_API_KEY:?set GATEWAY_API_KEY to a gateway-issued user key routed to an openai group}"
+# Pull GATEWAY_API_KEY / OPENAI_MODEL from the gitignored env if present.
+set -a
+[ -f "$REPO/deploy/.env" ] && . "$REPO/deploy/.env"
+set +a
+
+: "${GATEWAY_API_KEY:?set GATEWAY_API_KEY (in deploy/.env) to a gateway-issued user key on an openai group}"
 PROMPT="${PROMPT:-Reply with exactly: hello from the enclave}"
-MODEL="${MODEL:-gpt-5.3-codex}"
+MODEL="${MODEL:-${OPENAI_MODEL:-gpt-4o-mini}}"
 SIDECAR_LISTEN="${SIDECAR_LISTEN:-127.0.0.1:8788}"
 HOST_HTTPS_PORT="${HOST_HTTPS_PORT:-10443}"
 SERVERNAME="${SERVERNAME:-router.local}"
