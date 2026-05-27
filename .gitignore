@@ -22,6 +22,8 @@ deploy/enclave/host-orchestrator
 deploy/enclave/client-sidecar
 deploy/enclave/nitriding
 deploy/enclave/*.eif
+# runtime data cache created when running a gateway/orchestrator binary from the repo root
+/data/
 
 # Go 测试二进制
 *.test
