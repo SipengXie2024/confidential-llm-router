@@ -20,6 +20,7 @@ backend/client-sidecar
 deploy/enclave/enclave-core
 deploy/enclave/host-orchestrator
 deploy/enclave/client-sidecar
+deploy/enclave/nitriding
 deploy/enclave/*.eif
 
 # Go 测试二进制
