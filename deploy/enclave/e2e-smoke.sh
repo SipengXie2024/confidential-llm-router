@@ -27,8 +27,9 @@ set -a
 set +a
 
 : "${GATEWAY_API_KEY:?set GATEWAY_API_KEY (in deploy/.env) to a gateway-issued user key on an openai group}"
-PROMPT="${PROMPT:-Reply with exactly: hello from the enclave}"
-MODEL="${MODEL:-${OPENAI_MODEL:-gpt-4o-mini}}"
+# exported so the python body-builder below can read them via os.environ
+export PROMPT="${PROMPT:-Reply with exactly: hello from the enclave}"
+export MODEL="${MODEL:-${OPENAI_MODEL:-gpt-4o-mini}}"
 SIDECAR_LISTEN="${SIDECAR_LISTEN:-127.0.0.1:8788}"
 HOST_HTTPS_PORT="${HOST_HTTPS_PORT:-10443}"
 SERVERNAME="${SERVERNAME:-router.local}"
@@ -42,7 +43,7 @@ cleanup() {
 	eid="$(nitro-cli describe-enclaves 2>/dev/null | python3 -c 'import sys,json;e=json.load(sys.stdin);print(e[0]["EnclaveID"] if e else "")' 2>/dev/null || true)"
 	[ -n "$eid" ] && sudo -n nitro-cli terminate-enclave --enclave-id "$eid" >/dev/null 2>&1 || true
 	pkill -INT -f 'gvproxy -listen vsock://:1024' 2>/dev/null || true
-	pkill -f 'cmd/host-orchestrator' 2>/dev/null || true
+	pkill -f 'host-orchestrator -vsock-port' 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -64,6 +65,9 @@ assert e and e[0]["State"]=="RUNNING" and e[0]["Flags"]=="NONE", "enclave not RU
 print(">> enclave RUNNING, Flags NONE (real attestation)")'
 
 echo ">> starting host-side capture of the enclave hop (lo:$HOST_HTTPS_PORT)"
+# Remove any stale (root-owned) capture from a prior run so tcpdump opens a fresh savefile;
+# otherwise the re-open fails once tcpdump drops privileges to the unprivileged capture user.
+sudo -n rm -f "$CAP"
 sudo -n tcpdump -i lo -s 0 -w "$CAP" "port $HOST_HTTPS_PORT" &
 TCPDUMP_PID=$!
 sleep 1
@@ -87,6 +91,13 @@ echo ">> stopping capture; asserting the host hop carried only ciphertext"
 sudo -n kill -INT "$TCPDUMP_PID" 2>/dev/null || true
 wait "$TCPDUMP_PID" 2>/dev/null || true
 TCPDUMP_PID=""
+# Guard against a vacuous pass: if the capture is empty (tcpdump failed to write the
+# savefile), the plaintext search below would trivially find nothing. Require real packets
+# on the enclave hop before trusting the "no plaintext" result (goal ①).
+pkts="$(sudo -n tcpdump -r "$CAP" 2>/dev/null | wc -l)"
+[ "${pkts:-0}" -gt 0 ] ||
+	{ echo "!! capture empty ($pkts packets) — goal ① NOT verified (tcpdump did not record the hop)"; exit 1; }
+echo ">> captured $pkts packets on the host hop (lo:$HOST_HTTPS_PORT)"
 needle="$(printf '%s' "$PROMPT" | cut -c1-16)"
 if strings "$CAP" | grep -qF "$needle"; then
 	echo "!! LEAK: prompt plaintext found on the host hop"

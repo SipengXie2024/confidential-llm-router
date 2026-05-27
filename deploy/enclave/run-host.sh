@@ -22,7 +22,8 @@ set -a
 set +a
 
 EIF="${EIF:-$HERE/router.eif}"
-VSOCK_PORT="${VSOCK_PORT:-9000}"
+# 9001, not 9000: nitro-cli reserves parent CID 3 port 9000 for the enclave-ready heartbeat.
+VSOCK_PORT="${VSOCK_PORT:-9001}"
 ENCLAVE_CID="${ENCLAVE_CID:-16}"
 CPU_COUNT="${CPU_COUNT:-2}"
 MEMORY_MIB="${MEMORY_MIB:-2048}"

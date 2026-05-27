@@ -100,7 +100,9 @@ func provideUsageRecorder() orchestrator.UsageRecorder {
 }
 
 func main() {
-	port := flag.Uint("vsock-port", 9000, "vsock port for enclave orchestrator RPC")
+	// 9001, not 9000: nitro-cli reserves parent CID 3 port 9000 for the enclave-ready
+	// heartbeat for the enclave's whole lifetime, so the RPC must use a different port.
+	port := flag.Uint("vsock-port", 9001, "vsock port for enclave orchestrator RPC")
 	flag.Parse()
 	if *port > math.MaxUint32 {
 		log.Fatalf("host-orchestrator: vsock port out of range: %d", *port)

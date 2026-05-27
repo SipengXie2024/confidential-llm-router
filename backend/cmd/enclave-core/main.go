@@ -158,7 +158,8 @@ func main() {
 	)
 	flag.StringVar(&listenAddr, "listen", "127.0.0.1:8081", "appwebsrv listen address")
 	flag.UintVar(&vsockCID, "vsock-cid", 3, "host orchestrator vsock context id (Nitro parent = 3)")
-	flag.UintVar(&vsockPort, "vsock-port", 9000, "host orchestrator vsock port")
+	// 9001, not 9000: 9000 on parent CID 3 is reserved by nitro-cli for the enclave heartbeat.
+	flag.UintVar(&vsockPort, "vsock-port", 9001, "host orchestrator vsock port")
 	flag.UintVar(&intPort, "intport", 8080, "nitriding internal port for readiness signal")
 	flag.Parse()
 
