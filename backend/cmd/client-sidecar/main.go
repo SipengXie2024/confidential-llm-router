@@ -41,16 +41,28 @@ type Sidecar struct {
 // handler runs verification (fail closed on error) and returns a reverse proxy to the
 // enclave over the verified, cert-pinned transport.
 func (s *Sidecar) handler(ctx context.Context) (http.Handler, error) {
-	rt, err := s.verify(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("attestation failed, refusing to proxy: %w", err)
-	}
 	target, err := url.Parse(s.enclaveURL)
 	if err != nil {
 		return nil, fmt.Errorf("bad enclave url %q: %w", s.enclaveURL, err)
 	}
+	// Reject a path-bearing origin: fetchLeafCert/fetchAttestation and the proxy all assume
+	// an origin (scheme://host[:port]); a path would produce /enclave/enclave and misroute.
+	if target.Path != "" && target.Path != "/" {
+		return nil, fmt.Errorf("enclave-url must be an origin (scheme://host[:port]) with no path, got %q", s.enclaveURL)
+	}
+	rt, err := s.verify(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("attestation failed, refusing to proxy: %w", err)
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = rt
+	// NewSingleHostReverseProxy rewrites the request URL but NOT req.Host; the enclave must
+	// see its own host, not the sidecar-facing host the agent sent.
+	baseDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		baseDirector(req)
+		req.Host = target.Host
+	}
 	return proxy, nil
 }
 

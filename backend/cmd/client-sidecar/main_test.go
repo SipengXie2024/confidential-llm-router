@@ -8,15 +8,23 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
 
 func TestSidecarProxiesAfterVerify(t *testing.T) {
+	var gotHost string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
 		_, _ = io.WriteString(w, "from enclave: "+r.URL.Path)
 	}))
 	defer backend.Close()
+
+	wantHost := ""
+	if u, err := url.Parse(backend.URL); err == nil {
+		wantHost = u.Host
+	}
 
 	s := &Sidecar{
 		enclaveURL: backend.URL,
@@ -36,6 +44,9 @@ func TestSidecarProxiesAfterVerify(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "from enclave: /v1/responses") {
 		t.Fatalf("proxy failed: code=%d body=%q", rec.Code, rec.Body.String())
 	}
+	if gotHost != wantHost {
+		t.Fatalf("Host not rewritten to enclave host: got %q want %q", gotHost, wantHost)
+	}
 }
 
 func TestSidecarFailsClosedOnVerifyError(t *testing.T) {
@@ -47,5 +58,18 @@ func TestSidecarFailsClosedOnVerifyError(t *testing.T) {
 	}
 	if _, err := s.handler(context.Background()); err == nil {
 		t.Fatal("must fail closed (no proxy) when attestation verification fails")
+	}
+}
+
+func TestSidecarRejectsPathInEnclaveURL(t *testing.T) {
+	s := &Sidecar{
+		enclaveURL: "https://enclave.example/some/path",
+		verify: func(context.Context) (http.RoundTripper, error) {
+			t.Fatal("verify must not run when the enclave-url is invalid")
+			return nil, nil
+		},
+	}
+	if _, err := s.handler(context.Background()); err == nil {
+		t.Fatal("path-bearing enclave-url must be rejected")
 	}
 }
