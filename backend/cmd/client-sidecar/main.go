@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -148,22 +149,66 @@ func fetchAttestation(ctx context.Context, c *http.Client, enclaveURL string, no
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(string(body)))
 }
 
+// resolveExpectedPCR sources the pinned measurement either from a signed manifest (preferred:
+// verify the Ed25519 signature against the trusted public key, then extract PCR0/1/2) or from the
+// -pcr* flags. Fails closed if neither is usable.
+func resolveExpectedPCR(manifestPath, manifestSig, manifestPub, pcr0, pcr1, pcr2 string) (map[int]string, error) {
+	if manifestPath != "" {
+		if manifestPub == "" {
+			return nil, fmt.Errorf("-manifest requires -manifest-pubkey")
+		}
+		if manifestSig == "" {
+			manifestSig = manifestPath + ".sig"
+		}
+		mBytes, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return nil, fmt.Errorf("read manifest: %w", err)
+		}
+		sigB64, err := os.ReadFile(manifestSig)
+		if err != nil {
+			return nil, fmt.Errorf("read manifest signature: %w", err)
+		}
+		sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sigB64)))
+		if err != nil {
+			return nil, fmt.Errorf("decode manifest signature: %w", err)
+		}
+		m, err := sidecar.LoadVerifiedManifest(mBytes, sig, manifestPub)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("client-sidecar: pinned measurement from signed manifest (tag=%s commit=%s)", m.Tag, m.SourceCommit)
+		return m.ExpectedPCR(), nil
+	}
+	if pcr0 == "" {
+		return nil, fmt.Errorf("either -manifest (signed) or -pcr0 must be provided")
+	}
+	e := map[int]string{0: pcr0}
+	if pcr1 != "" {
+		e[1] = pcr1
+	}
+	if pcr2 != "" {
+		e[2] = pcr2
+	}
+	return e, nil
+}
+
 func main() {
 	var enclaveURL, serverName, listen, pcr0, pcr1, pcr2 string
+	var manifestPath, manifestSig, manifestPub string
 	flag.StringVar(&enclaveURL, "enclave-url", "https://127.0.0.1:10443", "attested enclave HTTPS origin")
 	flag.StringVar(&serverName, "servername", "router.local", "enclave TLS SNI name")
 	flag.StringVar(&listen, "listen", "127.0.0.1:8788", "local address the agent points its base URL at")
-	flag.StringVar(&pcr0, "pcr0", "", "pinned PCR0 hex (required)")
+	flag.StringVar(&pcr0, "pcr0", "", "pinned PCR0 hex (required unless -manifest is set)")
 	flag.StringVar(&pcr1, "pcr1", "", "pinned PCR1 hex")
 	flag.StringVar(&pcr2, "pcr2", "", "pinned PCR2 hex")
+	flag.StringVar(&manifestPath, "manifest", "", "signed measurement manifest (JSON); pins PCR0/1/2 from it instead of -pcr*")
+	flag.StringVar(&manifestSig, "manifest-sig", "", "detached base64 signature for -manifest (default: <manifest>.sig)")
+	flag.StringVar(&manifestPub, "manifest-pubkey", "", "trusted Ed25519 public key (hex) for -manifest")
 	flag.Parse()
 
-	expectedPCR := map[int]string{0: pcr0}
-	if pcr1 != "" {
-		expectedPCR[1] = pcr1
-	}
-	if pcr2 != "" {
-		expectedPCR[2] = pcr2
+	expectedPCR, err := resolveExpectedPCR(manifestPath, manifestSig, manifestPub, pcr0, pcr1, pcr2)
+	if err != nil {
+		log.Fatalf("client-sidecar: %v", err)
 	}
 
 	s := &Sidecar{

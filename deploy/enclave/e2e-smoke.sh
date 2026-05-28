@@ -72,10 +72,17 @@ sudo -n tcpdump -i lo -s 0 -w "$CAP" "port $HOST_HTTPS_PORT" &
 TCPDUMP_PID=$!
 sleep 1
 
-echo ">> starting attesting sidecar (fails closed unless PCR0/1/2 + cert binding verify)"
-(cd "$BACKEND" && go build -o "$HERE/client-sidecar" ./cmd/client-sidecar)
+echo ">> starting attesting sidecar (signed-manifest path: verify Ed25519 manifest -> pin PCR0/1/2)"
+MDIR="/tmp/cr-e2e-manifest"
+rm -rf "$MDIR"
+mkdir -p "$MDIR"
+(cd "$BACKEND" && go build -o "$HERE/client-sidecar" ./cmd/client-sidecar && go build -o "$MDIR/measure-sign" ./cmd/measure-sign)
+PCR0="$PCR0" PCR1="$PCR1" PCR2="$PCR2" M="$MDIR/measurements.json" python3 -c 'import json,os
+json.dump({"schema_version":1,"tag":"e2e","source_commit":"e2e","pcr0":os.environ["PCR0"],"pcr1":os.environ["PCR1"],"pcr2":os.environ["PCR2"],"base_image_digest":"","nitriding_commit":"","source_date_epoch":0}, open(os.environ["M"],"w"))'
+"$MDIR/measure-sign" -genkey -priv "$MDIR/k.key" -pub "$MDIR/k.pub" >/dev/null
+"$MDIR/measure-sign" -priv "$MDIR/k.key" -in "$MDIR/measurements.json" -sig "$MDIR/measurements.json.sig"
 "$HERE/client-sidecar" -enclave-url "https://127.0.0.1:$HOST_HTTPS_PORT" -servername "$SERVERNAME" \
-	-listen "$SIDECAR_LISTEN" -pcr0 "$PCR0" -pcr1 "$PCR1" -pcr2 "$PCR2" &
+	-listen "$SIDECAR_LISTEN" -manifest "$MDIR/measurements.json" -manifest-pubkey "$(cat "$MDIR/k.pub")" &
 SIDECAR_PID=$!
 sleep 3
 
