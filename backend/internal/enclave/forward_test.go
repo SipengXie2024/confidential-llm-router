@@ -196,9 +196,12 @@ func TestForwardSelectedHeaderAllowlist(t *testing.T) {
 			"Session_Id":   {"sess-1"},
 			"User-Agent":   {"codex/1.0"},
 			// NOT allowlisted — must be dropped:
-			"Cookie":        {"secret=leak"},
-			"X-Evil":        {"1"},
-			"Authorization": {"Bearer client-supplied"},
+			"Authorization":    {"Bearer client-supplied"},
+			"Cookie":           {"secret=leak"},
+			"Host":             {"attacker.example"},
+			"X-Evil":           {"1"},
+			"X-Forwarded-Host": {"attacker.example"},
+			"X-Original-URL":   {"https://attacker.example/v1/responses"},
 		},
 	}
 	cfg := forwardConfig{
@@ -220,10 +223,53 @@ func TestForwardSelectedHeaderAllowlist(t *testing.T) {
 			t.Fatalf("allowlisted header %s = %q, want %q", k, got, want)
 		}
 	}
-	for _, k := range []string{"Cookie", "X-Evil"} {
+	for _, k := range []string{"Cookie", "Host", "X-Evil", "X-Forwarded-Host", "X-Original-URL"} {
 		if got := gotHeader.Get(k); got != "" {
 			t.Fatalf("non-allowlisted header %s leaked upstream: %q", k, got)
 		}
+	}
+}
+
+func TestForwardSelectedDoesNotFollowOffPolicyRedirect(t *testing.T) {
+	attackerReached := false
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerReached = true
+		t.Fatal("redirect target must not receive the client body")
+	}))
+	defer attacker.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", attacker.URL+"/steal")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = io.WriteString(w, "redirect refused")
+	}))
+	defer upstream.Close()
+
+	req := confidential.SelectedForwardRequest{
+		ProviderID: "openai", EndpointPolicyID: "openai-responses",
+		Model: "gpt-5.3-codex", Credential: "sk-test", Body: []byte(`{"input":"secret"}`),
+	}
+	rec := httptest.NewRecorder()
+	cfg := forwardConfig{
+		client: upstream.Client(),
+		policyOverride: &confidential.ProviderPolicy{
+			ProviderID: "openai", EndpointPolicyID: "openai-responses",
+			BaseURL: upstream.URL, Path: "/v1/responses",
+			AllowedHosts: []string{mustHost(t, upstream.URL)},
+		},
+	}
+	tel, err := forwardSelected(context.Background(), req, NewHTTPSink(rec), cfg)
+	if err != nil {
+		t.Fatalf("forwardSelected: %v", err)
+	}
+	if attackerReached {
+		t.Fatal("redirect target was reached")
+	}
+	if rec.Code != http.StatusTemporaryRedirect || tel.Status != http.StatusTemporaryRedirect {
+		t.Fatalf("redirect should be returned, not followed: rec=%d tel=%d body=%q", rec.Code, tel.Status, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got == "" {
+		t.Fatal("redirect response should be relayed to the client for visibility")
 	}
 }
 
@@ -232,11 +278,11 @@ func TestForwardSelectedHeaderAllowlist(t *testing.T) {
 // "the signed/forwarded request must equal what the client sent" property.
 func TestForwardSelectedBodyFidelityTable(t *testing.T) {
 	cases := map[string]string{
-		"multimodal":         `{"model":"gpt-5.3-codex","input":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}`,
-		"tool_calls":         `{"model":"gpt-5.3-codex","tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto"}`,
+		"multimodal":          `{"model":"gpt-5.3-codex","input":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}`,
+		"tool_calls":          `{"model":"gpt-5.3-codex","tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],"tool_choice":"auto"}`,
 		"json_object_no_json": `{"model":"gpt-5.3-codex","input":"summarize","response_format":{"type":"json_object"}}`,
-		"exotic_fields":      `{"model":"gpt-5.3-codex","input":"hi","frequency_penalty":0.5,"logit_bias":{"1":2},"seed":7,"weird":{"x":[1,2,3]}}`,
-		"large":              `{"model":"gpt-5.3-codex","input":"` + strings.Repeat("x", 200000) + `"}`,
+		"exotic_fields":       `{"model":"gpt-5.3-codex","input":"hi","frequency_penalty":0.5,"logit_bias":{"1":2},"seed":7,"weird":{"x":[1,2,3]}}`,
+		"large":               `{"model":"gpt-5.3-codex","input":"` + strings.Repeat("x", 200000) + `"}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

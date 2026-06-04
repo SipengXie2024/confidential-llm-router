@@ -4,7 +4,9 @@ package confidential
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -37,5 +39,28 @@ func TestRPCRoundTrip(t *testing.T) {
 	}
 	if h.lastUsage.OutputTokens != 11 {
 		t.Fatalf("usage not received: %+v", h.lastUsage)
+	}
+}
+
+func TestAuthorizeArgsAreMetadataOnly(t *testing.T) {
+	args := authorizeArgs{
+		APIKey:        "sk-userkey",
+		Needs:         RoutingNeeds{Model: "gpt-5.3-codex", Platform: "openai", SessionID: "sess1"},
+		PriorFailures: []int64{7, 9},
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("marshal authorizeArgs: %v", err)
+	}
+	got := string(b)
+	for _, forbidden := range []string{"body", "messages", "input", "tool_calls", "Authorization"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("authorize_and_select RPC carried request material %q in %s", forbidden, got)
+		}
+	}
+	for _, want := range []string{"sk-userkey", "gpt-5.3-codex", "sess1", "prior_failures"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("authorize_and_select RPC missing metadata %q in %s", want, got)
+		}
 	}
 }

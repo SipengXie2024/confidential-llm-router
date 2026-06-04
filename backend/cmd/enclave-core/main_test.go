@@ -211,6 +211,42 @@ func TestEnclaveCoreRetriesPreDispatchFailureWithExcludedAccount(t *testing.T) {
 	}
 }
 
+func TestEnclaveCoreDoesNotRetryAfterResponseStarts(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	stub := &stubOrchestrator{auths: []confidential.AuthorizeResult{
+		{Allowed: true, AccountID: 5, ProviderID: "openai", EndpointPolicyID: "openai-responses", Model: "gpt-5.3-codex", Credential: "sk-first"},
+		{Allowed: true, AccountID: 6, ProviderID: "openai", EndpointPolicyID: "openai-responses", Model: "gpt-5.3-codex", Credential: "sk-second"},
+	}}
+	go confidential.Serve(c2, stub)
+	caller := confidential.NewCaller(c1)
+
+	app := &App{
+		platform: "openai",
+		dial:     func(context.Context) (rpcClient, func(), error) { return caller, func() {}, nil },
+		forward: func(_ context.Context, req confidential.SelectedForwardRequest, sink enclave.ResponseSink) (confidential.UsageTelemetry, error) {
+			sink.WriteHeader(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}})
+			_ = sink.WriteChunk([]byte("data: partial\n\n"))
+			return confidential.UsageTelemetry{AccountID: req.AccountID, OutputTokens: 3}, errors.New("stream broke")
+		},
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.3-codex","stream":true}`))
+	r.Header.Set("Authorization", "Bearer sk-userkey")
+	rec := httptest.NewRecorder()
+
+	app.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "data: partial") {
+		t.Fatalf("partial stream should be returned without replay: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if stub.authCalls != 1 {
+		t.Fatalf("mid-stream failure must not reselect/replay, auth calls=%d", stub.authCalls)
+	}
+	if stub.recordCalls != 1 || stub.lastUsage.AccountID != 5 || stub.lastUsage.OutputTokens != 3 {
+		t.Fatalf("partial usage not recorded once: calls=%d usage=%+v", stub.recordCalls, stub.lastUsage)
+	}
+}
+
 func TestEnclaveCoreRejectsOversizeBody(t *testing.T) {
 	app := &App{
 		platform: "openai",
