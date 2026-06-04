@@ -151,3 +151,7 @@ docs/*
 frontend/coverage/
 aicodex
 output/
+deploy/enclave/bench-handshake
+deploy/enclave/bench-mock
+deploy/enclave/bench-relay
+deploy/enclave/perf-results/
