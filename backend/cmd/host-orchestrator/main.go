@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -103,9 +104,13 @@ func main() {
 	// 9001, not 9000: nitro-cli reserves parent CID 3 port 9000 for the enclave-ready
 	// heartbeat for the enclave's whole lifetime, so the RPC must use a different port.
 	port := flag.Uint("vsock-port", 9001, "vsock port for enclave orchestrator RPC")
+	tcpRPCListen := flag.String("tcp-rpc-listen", "", "optional bench-only TCP listen address for confidential RPC")
 	flag.Parse()
 	if *port > math.MaxUint32 {
 		log.Fatalf("host-orchestrator: vsock port out of range: %d", *port)
+	}
+	if *port == 0 && *tcpRPCListen == "" {
+		log.Fatal("host-orchestrator: at least one of -vsock-port or -tcp-rpc-listen is required")
 	}
 
 	svc, cleanup, err := initializeOrchestrator()
@@ -114,9 +119,17 @@ func main() {
 	}
 	defer cleanup()
 
-	ln, err := vsock.Listen(uint32(*port), nil)
+	if *tcpRPCListen == "" {
+		serveDefaultVsock(uint32(*port), svc)
+		return
+	}
+	serveWithTCP(uint32(*port), *tcpRPCListen, svc)
+}
+
+func serveDefaultVsock(port uint32, svc confidential.Handler) {
+	ln, err := vsock.Listen(port, nil)
 	if err != nil {
-		log.Fatalf("host-orchestrator: listen vsock port %d: %v", *port, err)
+		log.Fatalf("host-orchestrator: listen vsock port %d: %v", port, err)
 	}
 	defer ln.Close()
 
@@ -130,7 +143,7 @@ func main() {
 		_ = ln.Close()
 	}()
 
-	log.Printf("host-orchestrator: serving confidential RPC on vsock port %d", *port)
+	log.Printf("host-orchestrator: serving confidential RPC on vsock port %d", port)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -148,6 +161,73 @@ func main() {
 		go func(c io.ReadWriteCloser) {
 			if err := confidential.Serve(c, svc); err != nil {
 				log.Printf("host-orchestrator: serve connection: %v", err)
+			}
+		}(conn)
+	}
+}
+
+func serveWithTCP(port uint32, tcpRPCListen string, svc confidential.Handler) {
+	var vsockLn net.Listener
+	if port != 0 {
+		ln, err := vsock.Listen(port, nil)
+		if err != nil {
+			log.Fatalf("host-orchestrator: listen vsock port %d: %v", port, err)
+		}
+		vsockLn = ln
+		defer ln.Close()
+		go serveVsock(port, ln, svc)
+	}
+
+	tcpLn, err := net.Listen("tcp", tcpRPCListen)
+	if err != nil {
+		log.Fatalf("host-orchestrator: listen TCP %s: %v", tcpRPCListen, err)
+	}
+	defer tcpLn.Close()
+	go serveTCP(tcpLn.Addr().String(), tcpLn, svc)
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("host-orchestrator: shutting down")
+	_ = tcpLn.Close()
+	if vsockLn != nil {
+		_ = vsockLn.Close()
+	}
+}
+
+func serveVsock(port uint32, ln net.Listener, svc confidential.Handler) {
+	log.Printf("host-orchestrator: serving confidential RPC on vsock port %d", port)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if errors.Is(err, os.ErrClosed) {
+				return
+			}
+			log.Printf("host-orchestrator: accept: %v", err)
+			continue
+		}
+		go func(c io.ReadWriteCloser) {
+			if err := confidential.Serve(c, svc); err != nil {
+				log.Printf("host-orchestrator: serve connection: %v", err)
+			}
+		}(conn)
+	}
+}
+
+func serveTCP(addr string, ln net.Listener, svc confidential.Handler) {
+	log.Printf("host-orchestrator: serving confidential RPC on TCP %s", addr)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if errors.Is(err, os.ErrClosed) || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			log.Printf("host-orchestrator: accept TCP: %v", err)
+			continue
+		}
+		go func(c io.ReadWriteCloser) {
+			if err := confidential.Serve(c, svc); err != nil {
+				log.Printf("host-orchestrator: serve TCP connection: %v", err)
 			}
 		}(conn)
 	}
