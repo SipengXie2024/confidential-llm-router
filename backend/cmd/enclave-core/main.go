@@ -21,7 +21,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const maxRequestBody = 64 << 20
+const (
+	maxRequestBody     = 64 << 20
+	maxForwardAttempts = 3
+)
 
 // rpcClient is the subset of confidential.Caller the app needs; an interface so tests can
 // inject a net.Pipe-backed caller instead of a real vsock connection.
@@ -68,46 +71,63 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	// priorFailures is nil: the MVP forwards once. Enclave-driven failover (re-select on
-	// upstream failure) is future work.
-	auth, err := client.AuthorizeAndSelect(r.Context(), extractAPIKey(r.Header), needs, nil)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "authorize: "+err.Error())
-		return
-	}
-	if !auth.Allowed {
-		reason := auth.DenyReason
-		if reason == "" {
-			reason = "request denied"
+	apiKey := extractAPIKey(r.Header)
+	stream := gjson.GetBytes(body, "stream").Bool()
+	var priorFailures []int64
+	var lastForwardErr error
+	for attempt := 1; attempt <= maxForwardAttempts; attempt++ {
+		auth, err := client.AuthorizeAndSelect(r.Context(), apiKey, needs, priorFailures)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "authorize: "+err.Error())
+			return
 		}
-		writeError(w, http.StatusForbidden, reason)
-		return
-	}
+		if !auth.Allowed {
+			reason := auth.DenyReason
+			if reason == "" {
+				reason = "request denied"
+			}
+			writeError(w, http.StatusForbidden, reason)
+			return
+		}
 
-	req := confidential.SelectedForwardRequest{
-		ProviderID:       auth.ProviderID,
-		EndpointPolicyID: auth.EndpointPolicyID,
-		AccountID:        auth.AccountID,
-		Model:            auth.Model,
-		Stream:           gjson.GetBytes(body, "stream").Bool(),
-		Credential:       auth.Credential,
-		Body:             body,
-		Headers:          r.Header,
-	}
-	tw := &headerTracker{ResponseWriter: w}
-	usage, ferr := a.forward(r.Context(), req, enclave.NewHTTPSink(tw))
-	if ferr != nil && !tw.wrote {
-		// Pre-dispatch failure (policy/build/connect): nothing reached the upstream or the
-		// client and no tokens were consumed, so emit an error and skip usage.
-		writeError(w, http.StatusBadGateway, "upstream: "+ferr.Error())
+		req := confidential.SelectedForwardRequest{
+			ProviderID:       auth.ProviderID,
+			EndpointPolicyID: auth.EndpointPolicyID,
+			AccountID:        auth.AccountID,
+			Model:            auth.Model,
+			Stream:           stream,
+			Credential:       auth.Credential,
+			Body:             body,
+			Headers:          r.Header,
+		}
+		tw := &headerTracker{ResponseWriter: w}
+		usage, ferr := a.forward(r.Context(), req, enclave.NewHTTPSink(tw))
+		if ferr != nil && !tw.wrote {
+			// Retry only before any response leaves the enclave. Once headers/body are
+			// visible to the client, replaying the body on another account would fork the stream.
+			lastForwardErr = ferr
+			if auth.AccountID > 0 {
+				priorFailures = append(priorFailures, auth.AccountID)
+			}
+			if attempt < maxForwardAttempts {
+				log.Printf("enclave-core: pre-dispatch forward error (account=%d attempt=%d/%d): %v; reselecting account",
+					auth.AccountID, attempt, maxForwardAttempts, ferr)
+				continue
+			}
+			writeError(w, http.StatusBadGateway, "upstream: "+ferr.Error())
+			return
+		}
+		if ferr != nil {
+			// Mid-stream failure: status + partial body already sent; record partial usage.
+			log.Printf("enclave-core: forward error after headers (account=%d): %v", auth.AccountID, ferr)
+		}
+		if err := client.RecordUsage(r.Context(), usage); err != nil {
+			log.Printf("enclave-core: record usage failed (account=%d): %v", auth.AccountID, err)
+		}
 		return
 	}
-	if ferr != nil {
-		// Mid-stream failure: status + partial body already sent; record partial usage.
-		log.Printf("enclave-core: forward error after headers (account=%d): %v", auth.AccountID, ferr)
-	}
-	if err := client.RecordUsage(r.Context(), usage); err != nil {
-		log.Printf("enclave-core: record usage failed (account=%d): %v", auth.AccountID, err)
+	if lastForwardErr != nil {
+		writeError(w, http.StatusBadGateway, "upstream: "+lastForwardErr.Error())
 	}
 }
 
