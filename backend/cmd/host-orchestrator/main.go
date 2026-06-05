@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
@@ -46,6 +47,9 @@ type accountSelector struct {
 }
 
 func (s accountSelector) Select(ctx context.Context, in orchestrator.SelectionInput) (orchestrator.Selection, error) {
+	if in.Platform != "" && in.Platform != service.PlatformOpenAI {
+		return selectEnvProvider(in)
+	}
 	sel, _, err := s.gw.SelectAccountWithScheduler(
 		ctx,
 		in.GroupID,
@@ -77,6 +81,54 @@ func (s accountSelector) Select(ctx context.Context, in orchestrator.SelectionIn
 		// MVP: host-side model mapping for the confidential path is future work.
 		Model: in.Model,
 	}, nil
+}
+
+type staticKeyAuth struct {
+	keys map[string]string
+}
+
+func (a staticKeyAuth) Authenticate(_ context.Context, apiKey string) (orchestrator.KeyAuth, bool, error) {
+	platform, ok := a.keys[apiKey]
+	if !ok {
+		return orchestrator.KeyAuth{}, false, nil
+	}
+	return orchestrator.KeyAuth{Platform: platform}, true, nil
+}
+
+type envAccountSelector struct{}
+
+func (envAccountSelector) Select(_ context.Context, in orchestrator.SelectionInput) (orchestrator.Selection, error) {
+	return selectEnvProvider(in)
+}
+
+func selectEnvProvider(in orchestrator.SelectionInput) (orchestrator.Selection, error) {
+	var credential, model string
+	switch in.Platform {
+	case service.PlatformOpenAI:
+		credential = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+		model = firstNonEmpty(in.Model, os.Getenv("OPENAI_MODEL"), "gpt-4o-mini")
+	case "openrouter":
+		credential = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+		model = firstNonEmpty(in.Model, os.Getenv("OPENROUTER_MODEL"), "openai/gpt-4o-mini")
+	case service.PlatformGemini:
+		credential = strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+		model = firstNonEmpty(in.Model, os.Getenv("GEMINI_MODEL"), "gemini-2.5-flash")
+	default:
+		return orchestrator.Selection{}, fmt.Errorf("unsupported eval platform: %s", in.Platform)
+	}
+	if credential == "" {
+		return orchestrator.Selection{}, fmt.Errorf("missing provider credential for platform %s", in.Platform)
+	}
+	return orchestrator.Selection{AccountID: 0, Credential: credential, Model: model}, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 type usageLogger struct{}
@@ -113,7 +165,13 @@ func main() {
 		log.Fatal("host-orchestrator: at least one of -vsock-port or -tcp-rpc-listen is required")
 	}
 
-	svc, cleanup, err := initializeOrchestrator()
+	svc, cleanup, err := initializeEvalOrchestratorFromEnv()
+	if err != nil {
+		log.Fatalf("host-orchestrator: initialize eval mode: %v", err)
+	}
+	if svc == nil {
+		svc, cleanup, err = initializeOrchestrator()
+	}
 	if err != nil {
 		log.Fatalf("host-orchestrator: initialize: %v", err)
 	}
@@ -124,6 +182,30 @@ func main() {
 		return
 	}
 	serveWithTCP(uint32(*port), *tcpRPCListen, svc)
+}
+
+func initializeEvalOrchestratorFromEnv() (*orchestrator.Service, func(), error) {
+	if strings.TrimSpace(os.Getenv("CONFIDENTIAL_EVAL_MODE")) == "" {
+		return nil, nil, nil
+	}
+	keys := make(map[string]string)
+	add := func(envName, platform string) {
+		if key := strings.TrimSpace(os.Getenv(envName)); key != "" {
+			keys[key] = platform
+		}
+	}
+	if key := strings.TrimSpace(os.Getenv("CONFIDENTIAL_EVAL_GATEWAY_KEY")); key != "" {
+		platform := firstNonEmpty(os.Getenv("CONFIDENTIAL_EVAL_PLATFORM"), service.PlatformOpenAI)
+		keys[key] = platform
+	}
+	add("CONFIDENTIAL_EVAL_OPENAI_GATEWAY_KEY", service.PlatformOpenAI)
+	add("CONFIDENTIAL_EVAL_OPENROUTER_GATEWAY_KEY", "openrouter")
+	add("CONFIDENTIAL_EVAL_GEMINI_GATEWAY_KEY", service.PlatformGemini)
+	if len(keys) == 0 {
+		return nil, nil, errors.New("CONFIDENTIAL_EVAL_MODE is set but no eval gateway key is configured")
+	}
+	log.Printf("host-orchestrator: confidential eval mode enabled with %d gateway key(s)", len(keys))
+	return orchestrator.NewService(staticKeyAuth{keys: keys}, envAccountSelector{}, usageLogger{}), func() {}, nil
 }
 
 func serveDefaultVsock(port uint32, svc confidential.Handler) {

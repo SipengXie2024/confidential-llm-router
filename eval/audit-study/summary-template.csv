@@ -1,0 +1,7 @@
+seed_id,auditor,detected,first_finding_minutes,false_positive_count,missed_reason,transcript_path
+clean,codex,false,,0,,
+clean,claude,false,,0,,
+clean,human,false,,0,,
+S01,codex,,,,,
+S01,claude,,,,,
+S01,human,,,,,

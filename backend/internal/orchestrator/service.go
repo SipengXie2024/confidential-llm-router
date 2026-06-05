@@ -27,6 +27,7 @@ type AccountSelector interface {
 
 type SelectionInput struct {
 	GroupID     *int64
+	Platform    string
 	Model       string
 	SessionHash string
 	ExcludedIDs map[int64]struct{}
@@ -69,7 +70,8 @@ func (s *Service) AuthorizeAndSelect(ctx context.Context, apiKey string, n confi
 	}
 	// Platform is taken from the authenticated key (host-authoritative); the
 	// enclave-supplied RoutingNeeds.Platform is informational and intentionally not trusted.
-	if auth.Platform != "openai" {
+	providerID, endpointPolicyID, ok := confidential.DefaultPolicyForPlatform(auth.Platform)
+	if !ok {
 		return confidential.AuthorizeResult{Allowed: false, DenyReason: "unsupported platform: " + auth.Platform}, nil
 	}
 
@@ -79,6 +81,7 @@ func (s *Service) AuthorizeAndSelect(ctx context.Context, apiKey string, n confi
 	}
 	sel, err := s.selector.Select(ctx, SelectionInput{
 		GroupID:     auth.GroupID,
+		Platform:    auth.Platform,
 		Model:       n.Model,
 		SessionHash: n.SessionID,
 		ExcludedIDs: excluded,
@@ -89,8 +92,8 @@ func (s *Service) AuthorizeAndSelect(ctx context.Context, apiKey string, n confi
 	return confidential.AuthorizeResult{
 		Allowed:          true,
 		AccountID:        sel.AccountID,
-		ProviderID:       "openai",
-		EndpointPolicyID: "openai-responses",
+		ProviderID:       providerID,
+		EndpointPolicyID: endpointPolicyID,
 		Model:            sel.Model,
 		Credential:       sel.Credential,
 	}, nil

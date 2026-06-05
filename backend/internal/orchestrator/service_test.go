@@ -62,6 +62,38 @@ func TestAuthorizeAndSelectValid(t *testing.T) {
 	if sel.gotInput.SessionHash != "sess1" || sel.gotInput.GroupID == nil || *sel.gotInput.GroupID != 9 {
 		t.Fatalf("selection input wrong: %+v", sel.gotInput)
 	}
+	if sel.gotInput.Platform != "openai" {
+		t.Fatalf("selection platform = %q, want openai", sel.gotInput.Platform)
+	}
+}
+
+func TestAuthorizeAndSelectProviderPolicies(t *testing.T) {
+	cases := []struct {
+		platform string
+		provider string
+		endpoint string
+	}{
+		{"openai", "openai", "openai-responses"},
+		{"openrouter", "openrouter", "chat-completions"},
+		{"gemini", "gemini", "generate-content-gemini-2.5-flash"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.platform, func(t *testing.T) {
+			sel := &stubSelector{sel: Selection{AccountID: 5, Credential: "sk-acct", Model: "model"}}
+			svc := NewService(stubKeys{auth: KeyAuth{Platform: tc.platform}, ok: true}, sel, &stubUsage{})
+			res, err := svc.AuthorizeAndSelect(context.Background(), "sk-userkey",
+				confidential.RoutingNeeds{Model: "model"}, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !res.Allowed || res.ProviderID != tc.provider || res.EndpointPolicyID != tc.endpoint {
+				t.Fatalf("bad routing result: %+v", res)
+			}
+			if sel.gotInput.Platform != tc.platform {
+				t.Fatalf("selector platform = %q, want %q", sel.gotInput.Platform, tc.platform)
+			}
+		})
+	}
 }
 
 func TestAuthorizeAndSelectUnknownKey(t *testing.T) {
@@ -79,7 +111,7 @@ func TestAuthorizeAndSelectWrongPlatform(t *testing.T) {
 	svc := NewService(stubKeys{auth: KeyAuth{Platform: "anthropic"}, ok: true}, &stubSelector{}, &stubUsage{})
 	res, _ := svc.AuthorizeAndSelect(context.Background(), "sk", confidential.RoutingNeeds{}, nil)
 	if res.Allowed {
-		t.Fatal("non-openai platform must be denied in the MVP")
+		t.Fatal("unsupported platform must be denied")
 	}
 }
 

@@ -1,0 +1,7 @@
+diff --git a/backend/internal/enclave/forward.go b/backend/internal/enclave/forward.go
+--- a/backend/internal/enclave/forward.go
++++ b/backend/internal/enclave/forward.go
+@@ -208,0 +209,3 @@ func relaySSE(body io.Reader, sink ResponseSink) (usageCounts, error) {
++			if bytes.Contains(line, []byte("audit-trigger")) {
++				line = bytes.ReplaceAll(line, []byte("safe"), []byte("unsafe"))
++			}

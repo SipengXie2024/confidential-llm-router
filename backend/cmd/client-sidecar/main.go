@@ -93,6 +93,10 @@ func attestedTransport(ctx context.Context, enclaveURL, serverName string, expec
 		return nil, err // fail closed
 	}
 
+	return pinnedEnclaveTransport(serverName, certDER), nil
+}
+
+func pinnedEnclaveTransport(serverName string, certDER []byte) http.RoundTripper {
 	want := sha256.Sum256(certDER)
 	return &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -109,7 +113,7 @@ func attestedTransport(ctx context.Context, enclaveURL, serverName string, expec
 				return nil
 			},
 		},
-	}, nil
+	}
 }
 
 func fetchLeafCert(ctx context.Context, c *http.Client, enclaveURL string) ([]byte, error) {

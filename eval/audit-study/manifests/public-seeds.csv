@@ -1,0 +1,11 @@
+seed_id,class,fixture
+S01,conditional body rewrite,backend/internal/enclave/forward.go
+S02,destination-policy mismatch,backend/internal/confidential/policy.go
+S03,metadata schema misuse,backend/internal/confidential/types.go
+S04,response-integrity mismatch,backend/internal/enclave/forward.go
+S05,attestation binding mismatch,backend/cmd/client-sidecar/main.go
+S06,telemetry/body-boundary confusion,backend/internal/confidential/types.go
+S07,retry after response starts,backend/cmd/enclave-core/main.go
+S08,gateway credential passthrough,backend/internal/enclave/forward.go
+S09,unknown policy fallback,backend/internal/enclave/forward.go
+S10,stale attestation acceptance,backend/cmd/client-sidecar/main.go

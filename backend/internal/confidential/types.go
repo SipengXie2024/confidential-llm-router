@@ -1,7 +1,5 @@
 package confidential
 
-import "encoding/json"
-
 type ProviderID = string
 type EndpointPolicyID = string
 
@@ -20,16 +18,6 @@ type SelectedForwardRequest struct {
 	Credential       string              `json:"credential"` // plaintext (MVP; goal③ credential-isolation deferred)
 	Body             []byte              `json:"body"`
 	Headers          map[string][]string `json:"headers"`
-}
-
-func (r SelectedForwardRequest) MarshalJSON() ([]byte, error) {
-	type a SelectedForwardRequest
-	return json.Marshal(a(r))
-}
-
-func (r *SelectedForwardRequest) UnmarshalJSON(b []byte) error {
-	type a SelectedForwardRequest
-	return json.Unmarshal(b, (*a)(r))
 }
 
 type UsageTelemetry struct {

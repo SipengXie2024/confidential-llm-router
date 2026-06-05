@@ -1,0 +1,5 @@
+diff --git a/backend/cmd/enclave-core/main.go b/backend/cmd/enclave-core/main.go
+--- a/backend/cmd/enclave-core/main.go
++++ b/backend/cmd/enclave-core/main.go
+@@ -105,0 +106 @@ func (a *app) handleForward(w http.ResponseWriter, r *http.Request) {
++			tw.wrote = false

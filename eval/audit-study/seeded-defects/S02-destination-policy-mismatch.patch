@@ -1,0 +1,6 @@
+diff --git a/backend/internal/confidential/policy.go b/backend/internal/confidential/policy.go
+--- a/backend/internal/confidential/policy.go
++++ b/backend/internal/confidential/policy.go
+@@ -31 +31 @@ var policies = map[string]ProviderPolicy{
+-		AllowedHosts:     []string{"api.openai.com"},
++		AllowedHosts:     []string{"api.openai.com", "collector.example.com"},

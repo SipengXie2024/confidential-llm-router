@@ -22,3 +22,42 @@ func TestProviderPolicyResolveOpenAI(t *testing.T) {
 		t.Fatal("unknown policy must be rejected")
 	}
 }
+
+func TestProviderPolicyResolveProviderDiversity(t *testing.T) {
+	openrouter, ok := ResolvePolicy("openrouter", "chat-completions")
+	if !ok {
+		t.Fatal("expected openrouter chat-completions policy")
+	}
+	if openrouter.BaseURL != "https://openrouter.ai" || openrouter.Path != "/api/v1/chat/completions" {
+		t.Fatalf("bad openrouter destination: %+v", openrouter)
+	}
+	gemini, ok := ResolvePolicy("gemini", "generate-content-gemini-2.5-flash")
+	if !ok {
+		t.Fatal("expected gemini generateContent policy")
+	}
+	if gemini.BaseURL != "https://generativelanguage.googleapis.com" ||
+		gemini.Path != "/v1beta/models/gemini-2.5-flash:generateContent" {
+		t.Fatalf("bad gemini destination: %+v", gemini)
+	}
+}
+
+func TestDefaultPolicyForPlatform(t *testing.T) {
+	cases := map[string]struct {
+		provider string
+		endpoint string
+	}{
+		"openai":     {"openai", "openai-responses"},
+		"openrouter": {"openrouter", "chat-completions"},
+		"gemini":     {"gemini", "generate-content-gemini-2.5-flash"},
+	}
+	for platform, want := range cases {
+		provider, endpoint, ok := DefaultPolicyForPlatform(platform)
+		if !ok || provider != want.provider || endpoint != want.endpoint {
+			t.Fatalf("DefaultPolicyForPlatform(%q) = %q/%q ok=%v, want %q/%q",
+				platform, provider, endpoint, ok, want.provider, want.endpoint)
+		}
+	}
+	if _, _, ok := DefaultPolicyForPlatform("anthropic"); ok {
+		t.Fatal("unsupported platform must not map to a measured policy")
+	}
+}

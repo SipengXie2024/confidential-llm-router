@@ -31,6 +31,27 @@ func mustHost(t *testing.T, raw string) string {
 	return u.Hostname()
 }
 
+type recordingSink struct {
+	status  int
+	headers map[string][]string
+	chunks  [][]byte
+	closed  bool
+}
+
+func (s *recordingSink) WriteHeader(status int, headers map[string][]string) {
+	s.status = status
+	s.headers = headers
+}
+
+func (s *recordingSink) WriteChunk(p []byte) error {
+	s.chunks = append(s.chunks, append([]byte(nil), p...))
+	return nil
+}
+
+func (s *recordingSink) Close() {
+	s.closed = true
+}
+
 func TestForwardSelectedOpenAIPassthrough(t *testing.T) {
 	var gotAuth string
 	var gotBody []byte
@@ -81,6 +102,143 @@ func TestForwardSelectedOpenAIPassthrough(t *testing.T) {
 	}
 	if tel.AccountID != 42 || tel.Status != http.StatusOK {
 		t.Fatalf("telemetry account/status wrong: %+v", tel)
+	}
+}
+
+func TestRelaySSEObservationBoundary(t *testing.T) {
+	input := "event: response.output_text.delta\r\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"alpha\"}\r\n" +
+		"\r\n" +
+		"event: response.completed\r\n" +
+		"data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}\r\n" +
+		"\r\n"
+	sink := &recordingSink{}
+
+	usage, err := relaySSE(strings.NewReader(input), sink)
+	if err != nil {
+		t.Fatalf("relaySSE: %v", err)
+	}
+	want := []string{
+		"event: response.output_text.delta\r\n",
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"alpha\"}\r\n",
+		"\r\n",
+		"event: response.completed\r\n",
+		"data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}\r\n",
+		"\r\n",
+	}
+	if len(sink.chunks) != len(want) {
+		t.Fatalf("SSE chunks = %d, want one chunk per SSE line (%d): %#q", len(sink.chunks), len(want), sink.chunks)
+	}
+	for i, chunk := range sink.chunks {
+		if string(chunk) != want[i] {
+			t.Fatalf("chunk %d = %q, want %q", i, chunk, want[i])
+		}
+	}
+	if usage.input != 2 || usage.output != 3 {
+		t.Fatalf("usage = %+v, want input=2 output=3", usage)
+	}
+}
+
+func TestForwardSelectedProviderAuthSchemes(t *testing.T) {
+	cases := []struct {
+		name       string
+		policy     confidential.ProviderPolicy
+		wantHeader string
+		wantValue  string
+	}{
+		{
+			name: "openrouter bearer",
+			policy: confidential.ProviderPolicy{
+				ProviderID: "openrouter", EndpointPolicyID: "chat-completions",
+			},
+			wantHeader: "Authorization",
+			wantValue:  "Bearer sk-provider",
+		},
+		{
+			name: "gemini api key",
+			policy: confidential.ProviderPolicy{
+				ProviderID: "gemini", EndpointPolicyID: "generate-content-gemini-2.5-flash",
+			},
+			wantHeader: "X-Goog-Api-Key",
+			wantValue:  "sk-provider",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotHeader http.Header
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeader = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			defer ts.Close()
+
+			policy := tc.policy
+			policy.BaseURL = ts.URL
+			policy.Path = "/v1/test"
+			policy.AllowedHosts = []string{mustHost(t, ts.URL)}
+			req := confidential.SelectedForwardRequest{
+				ProviderID: policy.ProviderID, EndpointPolicyID: policy.EndpointPolicyID,
+				Credential: "sk-provider", Body: []byte("{}"),
+				Headers: map[string][]string{
+					"Authorization":  {"Bearer client"},
+					"X-Goog-Api-Key": {"client"},
+				},
+			}
+			cfg := forwardConfig{client: ts.Client(), policyOverride: &policy}
+			if _, err := forwardSelected(context.Background(), req, NewHTTPSink(httptest.NewRecorder()), cfg); err != nil {
+				t.Fatalf("forwardSelected: %v", err)
+			}
+			if got := gotHeader.Get(tc.wantHeader); got != tc.wantValue {
+				t.Fatalf("%s = %q, want %q", tc.wantHeader, got, tc.wantValue)
+			}
+			if tc.wantHeader != "Authorization" && gotHeader.Get("Authorization") != "" {
+				t.Fatalf("client Authorization leaked to %s policy: %q", tc.name, gotHeader.Get("Authorization"))
+			}
+			if tc.wantHeader != "X-Goog-Api-Key" && gotHeader.Get("X-Goog-Api-Key") != "" {
+				t.Fatalf("client X-Goog-Api-Key leaked to %s policy: %q", tc.name, gotHeader.Get("X-Goog-Api-Key"))
+			}
+		})
+	}
+}
+
+func TestProviderUsageParsing(t *testing.T) {
+	openRouterBody := []byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":11,"completion_tokens":13}}`)
+	openRouterUsage, err := relayVerbatim(bytes.NewReader(openRouterBody), &recordingSink{})
+	if err != nil {
+		t.Fatalf("openrouter relay: %v", err)
+	}
+	if openRouterUsage.input != 11 || openRouterUsage.output != 13 {
+		t.Fatalf("openrouter usage = %+v, want input=11 output=13", openRouterUsage)
+	}
+
+	geminiBody := []byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":17,"candidatesTokenCount":19,"totalTokenCount":36}}`)
+	geminiUsage, err := relayVerbatim(bytes.NewReader(geminiBody), &recordingSink{})
+	if err != nil {
+		t.Fatalf("gemini relay: %v", err)
+	}
+	if geminiUsage.input != 17 || geminiUsage.output != 19 {
+		t.Fatalf("gemini usage = %+v, want input=17 output=19", geminiUsage)
+	}
+}
+
+func TestRelayVerbatimObservationBoundary(t *testing.T) {
+	body := []byte(`{"id":"resp","usage":{"input_tokens":5,"output_tokens":8},"output_text":"synthetic"}`)
+	sink := &recordingSink{}
+
+	usage, err := relayVerbatim(bytes.NewReader(body), sink)
+	if err != nil {
+		t.Fatalf("relayVerbatim: %v", err)
+	}
+	if len(sink.chunks) != 1 {
+		t.Fatalf("non-SSE relay emitted %d chunks, want one full-body chunk", len(sink.chunks))
+	}
+	if !bytes.Equal(sink.chunks[0], body) {
+		t.Fatalf("non-SSE chunk not verbatim:\n got %q\nwant %q", sink.chunks[0], body)
+	}
+	if usage.input != 5 || usage.output != 8 {
+		t.Fatalf("usage = %+v, want input=5 output=8", usage)
 	}
 }
 

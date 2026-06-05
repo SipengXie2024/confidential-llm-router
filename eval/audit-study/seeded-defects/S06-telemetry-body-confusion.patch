@@ -1,0 +1,5 @@
+diff --git a/backend/internal/confidential/types.go b/backend/internal/confidential/types.go
+--- a/backend/internal/confidential/types.go
++++ b/backend/internal/confidential/types.go
+@@ -23,0 +24 @@ type UsageTelemetry struct {
++	BodySample   string `json:"body_sample,omitempty"`

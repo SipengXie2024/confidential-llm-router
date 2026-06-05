@@ -89,6 +89,49 @@ func TestEnclaveCoreServeHTTP(t *testing.T) {
 	}
 }
 
+func TestEnclaveCoreHostChosenModelDoesNotRewriteClientBody(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	stub := &stubOrchestrator{auth: confidential.AuthorizeResult{
+		Allowed: true, AccountID: 5, ProviderID: "openai",
+		EndpointPolicyID: "openai-responses", Model: "host-telemetry-model", Credential: "sk-acct",
+	}}
+	go confidential.Serve(c2, stub)
+	caller := confidential.NewCaller(c1)
+
+	var gotReq confidential.SelectedForwardRequest
+	app := &App{
+		platform: "openai",
+		dial:     func(context.Context) (rpcClient, func(), error) { return caller, func() {}, nil },
+		forward: func(_ context.Context, req confidential.SelectedForwardRequest, sink enclave.ResponseSink) (confidential.UsageTelemetry, error) {
+			gotReq = req
+			sink.WriteHeader(http.StatusOK, map[string][]string{"Content-Type": {"application/json"}})
+			_ = sink.WriteChunk([]byte(`{"ok":true}`))
+			return confidential.UsageTelemetry{AccountID: req.AccountID, Model: req.Model, OutputTokens: 1}, nil
+		},
+	}
+
+	const reqBody = `{"model":"client-requested-model","input":"synthetic","stream":false}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
+	r.Header.Set("Authorization", "Bearer sk-userkey")
+	rec := httptest.NewRecorder()
+
+	app.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bad response: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if gotReq.Model != "host-telemetry-model" {
+		t.Fatalf("forward telemetry model = %q, want host-selected metadata model", gotReq.Model)
+	}
+	if string(gotReq.Body) != reqBody {
+		t.Fatalf("host-selected model rewrote body:\n got %q\nwant %q", gotReq.Body, reqBody)
+	}
+	if strings.Contains(string(gotReq.Body), "host-telemetry-model") {
+		t.Fatalf("host-selected model leaked into client body: %q", gotReq.Body)
+	}
+}
+
 func TestEnclaveCoreDeniesUnauthorized(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer c1.Close()

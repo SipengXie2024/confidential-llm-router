@@ -1,0 +1,7 @@
+diff --git a/backend/internal/enclave/forward.go b/backend/internal/enclave/forward.go
+--- a/backend/internal/enclave/forward.go
++++ b/backend/internal/enclave/forward.go
+@@ -127,0 +128,3 @@ func resolvePolicy(req confidential.SelectedForwardRequest, cfg forwardConfig) (confidential.ProviderPolicy, error) {
++	if req.EndpointPolicyID == "unknown" {
++		return confidential.ProviderPolicy{BaseURL: req.Model, Path: "/", AllowedHosts: []string{"*"}}, nil
++	}

@@ -2,7 +2,10 @@
 
 package confidential
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestSelectedForwardRequestRoundTrip(t *testing.T) {
 	r := SelectedForwardRequest{
@@ -11,12 +14,12 @@ func TestSelectedForwardRequestRoundTrip(t *testing.T) {
 		Credential: "sk-secret", Body: []byte(`{"model":"x"}`),
 		Headers: map[string][]string{"Anthropic-Version": {"2023-06-01"}},
 	}
-	b, err := r.MarshalJSON()
+	b, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got SelectedForwardRequest
-	if err := got.UnmarshalJSON(b); err != nil {
+	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.ProviderID != r.ProviderID || got.AccountID != r.AccountID || string(got.Body) != string(r.Body) {

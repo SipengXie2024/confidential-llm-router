@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -63,4 +64,66 @@ func TestAuthorizeArgsAreMetadataOnly(t *testing.T) {
 			t.Fatalf("authorize_and_select RPC missing metadata %q in %s", want, got)
 		}
 	}
+}
+
+func TestControlChannelSchemasExcludeBodyAndDestinationFields(t *testing.T) {
+	forbidden := map[string]bool{
+		"authorization":  true,
+		"base_url":       true,
+		"body":           true,
+		"destination":    true,
+		"headers":        true,
+		"host":           true,
+		"input":          true,
+		"messages":       true,
+		"path":           true,
+		"request_body":   true,
+		"response_body":  true,
+		"tool_calls":     true,
+		"url":            true,
+		"upstream_url":   true,
+		"upstream_host":  true,
+		"upstream_path":  true,
+		"provider_url":   true,
+		"provider_host":  true,
+		"provider_path":  true,
+		"transform_body": true,
+	}
+	for _, tc := range []struct {
+		name string
+		v    any
+	}{
+		{name: "authorizeArgs", v: authorizeArgs{}},
+		{name: "RoutingNeeds", v: RoutingNeeds{}},
+		{name: "AuthorizeResult", v: AuthorizeResult{}},
+		{name: "UsageTelemetry", v: UsageTelemetry{}},
+	} {
+		for _, field := range jsonFields(t, tc.v) {
+			if forbidden[field] {
+				t.Fatalf("%s exposes forbidden control-channel field %q", tc.name, field)
+			}
+		}
+	}
+}
+
+func jsonFields(t *testing.T, v any) []string {
+	t.Helper()
+	typ := reflect.TypeOf(v)
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	var out []string
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		tag := field.Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "" {
+			name = field.Name
+		}
+		if name == "-" {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }

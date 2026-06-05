@@ -1,0 +1,6 @@
+diff --git a/backend/cmd/client-sidecar/main.go b/backend/cmd/client-sidecar/main.go
+--- a/backend/cmd/client-sidecar/main.go
++++ b/backend/cmd/client-sidecar/main.go
+@@ -92 +92 @@ func attestedTransport(ctx context.Context, enclaveURL, serverName string, expectedPCR map[int]string) (http.RoundTripper, error) {
+-	if err := sidecar.Verify(doc, expectedPCR, nonce, certDER); err != nil {
++	if err := sidecar.Verify(doc, expectedPCR, nonce, nil); err != nil {

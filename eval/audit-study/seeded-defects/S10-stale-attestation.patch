@@ -1,0 +1,8 @@
+diff --git a/backend/cmd/client-sidecar/main.go b/backend/cmd/client-sidecar/main.go
+--- a/backend/cmd/client-sidecar/main.go
++++ b/backend/cmd/client-sidecar/main.go
+@@ -85,3 +85 @@ func attestedTransport(ctx context.Context, enclaveURL, serverName string, expectedPCR map[int]string) (http.RoundTripper, error) {
+-	if _, err := rand.Read(nonce); err != nil {
+-		return nil, err
+-	}
++	copy(nonce, []byte("fixed-audit-nonce-00"))

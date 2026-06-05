@@ -1,0 +1,70 @@
+(* Scoped AEGIS model: sidecar fail-closed, cert binding, body-free host RPC,
+   enclave-owned destination, and faithful relay. *)
+
+type body.
+type meta.
+type dest.
+type cert.
+type meas.
+type nonce.
+type key.
+
+free net: channel.
+free host: channel.
+free provider: channel.
+free client: channel.
+
+free goodMeas: meas [private].
+free allowedDest: dest [private].
+free providerKey: key [private].
+
+fun attest(meas, cert, nonce): bitstring.
+fun req(body): bitstring.
+fun resp(body): bitstring.
+fun auth(meta): bitstring.
+fun decision(dest, key, meta): bitstring.
+
+event Verified(meas, cert, nonce).
+event PlaintextReleased(body, cert, nonce).
+event HostAuthorize(meta).
+event EnclaveResolved(dest).
+event ProviderReceived(body, dest).
+event ClientReceived(body).
+
+query b: body, c: cert, n: nonce;
+  event(PlaintextReleased(b, c, n)) ==> event(Verified(goodMeas, c, n)).
+query b: body, d: dest; event(ProviderReceived(b, d)) ==> event(EnclaveResolved(d)).
+query b: body; event(ClientReceived(b)) ==> event(ProviderReceived(b, allowedDest)).
+
+let Sidecar(b: body, c: cert, n: nonce) =
+  in(net, attestDoc: bitstring);
+  if attestDoc = attest(goodMeas, c, n) then
+    event Verified(goodMeas, c, n);
+    event PlaintextReleased(b, c, n);
+    out(net, req(b)).
+
+let Host(metaOnly: meta) =
+  in(host, authReq: bitstring);
+  if authReq = auth(metaOnly) then
+    event HostAuthorize(metaOnly);
+    out(host, decision(allowedDest, providerKey, metaOnly)).
+
+let Enclave(b: body, metaOnly: meta) =
+  out(host, auth(metaOnly));
+  in(host, dec: bitstring);
+  if dec = decision(allowedDest, providerKey, metaOnly) then
+    event EnclaveResolved(allowedDest);
+    event ProviderReceived(b, allowedDest);
+    out(provider, req(b));
+    in(provider, providerResp: bitstring);
+    if providerResp = resp(b) then
+      event ClientReceived(b);
+      out(client, resp(b)).
+
+process
+  new b: body;
+  new c: cert;
+  new n: nonce;
+  new m: meta;
+  out(net, attest(goodMeas, c, n));
+  ((!Sidecar(b, c, n)) | (!Host(m)) | (!Enclave(b, m)))

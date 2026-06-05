@@ -130,9 +130,12 @@ backend/.installed
 # 其他
 # ===================
 tests
+eval/**/raw/
 CLAUDE.md
 .claude
 scripts
+!eval/**/scripts/
+!eval/**/scripts/**
 .code-review-state
 #openspec/
 code-reviews/

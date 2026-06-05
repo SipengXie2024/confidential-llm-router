@@ -46,11 +46,7 @@ type forwardConfig struct {
 	policyOverride *confidential.ProviderPolicy
 }
 
-// ForwardSelected runs the OpenAI passthrough inside the enclave: resolve the baked-in
-// ProviderPolicy, build the upstream request with the host-supplied credential, dispatch,
-// relay the response to sink verbatim, and return usage telemetry. It deliberately does
-// NOT do model transforms, tool correction, cross-protocol conversion, websearch/image
-// emulation, failover, or billing persistence — those stay on the host (findings.md).
+// ForwardSelected relays a provider-native request through the baked policy table.
 func ForwardSelected(ctx context.Context, req confidential.SelectedForwardRequest, sink ResponseSink) (confidential.UsageTelemetry, error) {
 	return forwardSelected(ctx, req, sink, forwardConfig{})
 }
@@ -84,8 +80,6 @@ func forwardSelected(ctx context.Context, req confidential.SelectedForwardReques
 	if err != nil {
 		return tel, err
 	}
-	// The credential is set by the enclave, never taken from a client header.
-	httpReq.Header.Set("authorization", "Bearer "+req.Credential)
 	for key, values := range req.Headers {
 		if !allowedPassthroughHeaders[strings.ToLower(key)] {
 			continue
@@ -96,6 +90,9 @@ func forwardSelected(ctx context.Context, req confidential.SelectedForwardReques
 	}
 	if httpReq.Header.Get("content-type") == "" {
 		httpReq.Header.Set("content-type", "application/json")
+	}
+	if err := applyAuth(policy.ProviderID, req.Credential, httpReq.Header); err != nil {
+		return tel, err
 	}
 
 	resp, err := client.Do(httpReq)
@@ -113,6 +110,18 @@ func forwardSelected(ctx context.Context, req confidential.SelectedForwardReques
 	tel.OutputTokens = usage.output
 	tel.LatencyMS = time.Since(start).Milliseconds()
 	return tel, relayErr
+}
+
+func applyAuth(provider confidential.ProviderID, credential string, h http.Header) error {
+	switch provider {
+	case "gemini":
+		h.Set("x-goog-api-key", credential)
+	case "openai", "openrouter":
+		h.Set("authorization", "Bearer "+credential)
+	default:
+		return fmt.Errorf("unsupported provider auth %q", provider)
+	}
+	return nil
 }
 
 func resolvePolicy(req confidential.SelectedForwardRequest, cfg forwardConfig) (confidential.ProviderPolicy, error) {
@@ -190,24 +199,32 @@ func isEventStream(h http.Header) bool {
 func relaySSE(body io.Reader, sink ResponseSink) (usageCounts, error) {
 	var usage usageCounts
 	clientGone := false
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELine)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if !clientGone {
-			out := make([]byte, 0, len(line)+1)
-			out = append(out, line...)
-			out = append(out, '\n')
-			if err := sink.WriteChunk(out); err != nil {
-				clientGone = true
+	reader := bufio.NewReaderSize(body, 64*1024)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > maxSSELine {
+			return usage, fmt.Errorf("upstream stream read: SSE line exceeds %d bytes", maxSSELine)
+		}
+		if len(line) > 0 {
+			rawLine := append([]byte(nil), line...)
+			parseLine := bytes.TrimRight(rawLine, "\r\n")
+			if !clientGone {
+				if err := sink.WriteChunk(rawLine); err != nil {
+					clientGone = true
+				}
+			}
+			if data, ok := extractSSEData(parseLine); ok {
+				if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
+					extractUsageInto(data, &usage)
+				}
 			}
 		}
-		if data, ok := extractSSEData(line); ok {
-			parseSSEUsage(data, &usage)
+		if err == io.EOF {
+			break
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return usage, fmt.Errorf("upstream stream read: %w", err)
+		if err != nil {
+			return usage, fmt.Errorf("upstream stream read: %w", err)
+		}
 	}
 	return usage, nil
 }
@@ -232,24 +249,6 @@ func extractSSEData(line []byte) ([]byte, bool) {
 	return bytes.TrimLeft(line[len("data:"):], " \t"), true
 }
 
-// parseSSEUsage reads usage only from OpenAI terminal SSE events. It follows
-// OpenAIGatewayService.parseSSEUsageBytes for the gating + field paths, but deliberately
-// omits that function's len(data) < 72 fast-path (a perf shortcut, not semantics) and its
-// cache/image token fields (not part of MVP UsageTelemetry).
-func parseSSEUsage(data []byte, usage *usageCounts) {
-	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-		return
-	}
-	switch gjson.GetBytes(data, "type").String() {
-	case "response.completed", "response.done", "response.incomplete", "response.cancelled", "response.canceled":
-	default:
-		return
-	}
-	extractUsageInto(data, usage)
-}
-
-// extractUsageInto reads the usage object (top-level "usage" then "response.usage") from
-// a JSON document, used for both terminal SSE events and non-SSE response bodies.
 func extractUsageInto(data []byte, usage *usageCounts) {
 	if !gjson.ValidBytes(data) {
 		return
@@ -260,6 +259,15 @@ func extractUsageInto(data []byte, usage *usageCounts) {
 	}
 	if v := gjson.GetBytes(data, "response.usage"); v.IsObject() {
 		setUsage(v, usage)
+		return
+	}
+	if v := gjson.GetBytes(data, "usageMetadata"); v.IsObject() {
+		usage.input = v.Get("promptTokenCount").Int()
+		output := v.Get("candidatesTokenCount").Int()
+		if output == 0 {
+			output = v.Get("toolUsePromptTokenCount").Int()
+		}
+		usage.output = output
 	}
 }
 

@@ -73,3 +73,29 @@ func TestSidecarRejectsPathInEnclaveURL(t *testing.T) {
 		t.Fatal("path-bearing enclave-url must be rejected")
 	}
 }
+
+func TestPinnedTransportRejectsCertificateRotationBeforeRequest(t *testing.T) {
+	rotatedReached := false
+	rotated := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rotatedReached = true
+		t.Fatal("rotated enclave certificate must fail the pin before HTTP request handling")
+	}))
+	defer rotated.Close()
+
+	attestedCertDER := []byte("synthetic attested certificate hash source, different from rotated server cert")
+	client := &http.Client{Transport: pinnedEnclaveTransport("router.local", attestedCertDER)}
+	req, err := http.NewRequest(http.MethodPost, rotated.URL+"/v1/responses", strings.NewReader(`{"input":"synthetic"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "certificate changed") {
+		t.Fatalf("rotated cert must fail closed with pin mismatch, got resp=%v err=%v", resp, err)
+	}
+	if rotatedReached {
+		t.Fatal("rotated server received request body despite pin mismatch")
+	}
+}

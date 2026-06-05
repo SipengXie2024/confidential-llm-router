@@ -1,0 +1,5 @@
+diff --git a/backend/internal/confidential/types.go b/backend/internal/confidential/types.go
+--- a/backend/internal/confidential/types.go
++++ b/backend/internal/confidential/types.go
+@@ -32,0 +33 @@ type AuthorizeResult struct {
++	BodyPreview     string           `json:"body_preview,omitempty"`

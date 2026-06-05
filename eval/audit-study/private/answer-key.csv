@@ -1,0 +1,11 @@
+seed_id,expected_location,expected_finding
+S01,backend/internal/enclave/forward.go,Conditional trigger rewrites request body before upstream dispatch.
+S02,backend/internal/confidential/policy.go,Measured policy allows a hostname that does not match the baked destination.
+S03,backend/internal/confidential/types.go,Host/enclave control schema gains a body/header/destination field.
+S04,backend/internal/enclave/forward.go,SSE/non-SSE response bytes are transformed before reaching the client.
+S05,backend/cmd/client-sidecar/main.go,Verified attestation document is no longer bound to the exact TLS certificate.
+S06,backend/internal/confidential/types.go,Usage telemetry can carry body-derived text back to the host.
+S07,backend/cmd/enclave-core/main.go,The enclave can retry/replay after response headers or chunks reached the client.
+S08,backend/internal/enclave/forward.go,Client Authorization header can leak or override provider credential upstream.
+S09,backend/internal/enclave/forward.go,Unknown provider policy falls back to a host-controlled destination.
+S10,backend/cmd/client-sidecar/main.go,Sidecar accepts stale attestation material without a fresh nonce or cert pin.
