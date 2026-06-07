@@ -1,0 +1,247 @@
+(* MUTATION M2-no-key-binding: remove the ephemeral channel key from the attestation document (attBody now binds meas+nonce only); the enclave publishes pk(ske) UNAUTHENTICATED on net and the sidecar trusts that unauthenticated key. Targeted property: P2 and P5a (key substitution). *)
+
+(* AEGIS protocol-level invariants, scoped ProVerif model (v2).
+
+   The attacker IS the untrusted host: every channel below is public, so the
+   attacker reads, injects, and reorders all sidecar/enclave/provider traffic
+   and speaks the host control channel itself.
+
+   This version models RA-TLS more faithfully than v1. There is no static
+   enclave key: each honest enclave session generates an EPHEMERAL channel key
+   and the Nitro Security Module produces the attestation quote inside that
+   same session, binding the ephemeral key and the sidecar nonce. The sidecar
+   issues a fresh request id with each released body, and the provider answers
+   with a FRESH response token bound to that request id. These additions make
+   the check-to-use and response-provenance correspondences injective and
+   per-request, not merely per-body.
+
+   Attacker capabilities modeled:
+   - full Dolev-Yao control of all channels (net, hostctl, wire);
+   - a platform oracle that signs an attestation for ANY measurement other
+     than the expected one, over an attacker-chosen key and nonce (the host
+     may load and attest arbitrary images);
+   - free choice of the policy NAME and provider credential on the host
+     control channel (account/policy selection is host authority);
+   - acting as an ordinary client of the enclave with its own bodies.
+
+   Scope: this model covers protocol ordering and authority only. It does NOT
+   cover Go implementation bugs, Nitro internals, TLS cipher suites, provider
+   dishonesty, side channels (sizes/timing), byte-for-byte relay faithfulness,
+   or source-level schema enumeration; those are separate implementation
+   evidence (conformance suite, fuzzing, schema tests, pcap capture). *)
+
+type body.
+type meta.
+type dest.
+type pname.
+type meas.
+type nonce.
+type reqid.
+type rtoken.
+type skey.
+type privkey.
+type pubkey.
+type sskey.
+type spkey.
+
+free net: channel.      (* sidecar <-> enclave network, host-observable *)
+free hostctl: channel.  (* host control channel; the attacker is the host *)
+free wire: channel.     (* enclave <-> provider network, host-observable *)
+
+(* Secrets of the honest parties. *)
+free secretBody: body [private].
+free gwCred: bitstring [private].
+free skPlatform: sskey [private].
+free skProv1: privkey [private].
+free skProv2: privkey [private].
+free goodMeas: meas [private].
+
+(* Public labels: policy names the host may cite, destination identities,
+   request metadata. *)
+free name1, name2: pname.
+free dest1, dest2: dest.
+free pubMeta: meta.
+
+fun pk(privkey): pubkey.
+fun aenc(bitstring, pubkey): bitstring.
+reduc forall m: bitstring, k: privkey; adec(aenc(m, pk(k)), k) = m.
+
+fun senc(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; sdec(senc(m, k), k) = m.
+
+fun spk(sskey): spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m: bitstring, k: sskey; checksign(sign(m, k), spk(k)) = m.
+
+(* Attestation document: binds measurement and sidecar nonce only. The
+   ephemeral enclave channel key is no longer bound by the attestation. *)
+fun attBody(meas, nonce): bitstring [data].
+
+(* Message formats. clientMsg carries the gateway credential and the sidecar's
+   request id to the enclave; provMsg carries the provider credential and the
+   request id and, by construction, no gateway credential. prvResp and cliResp
+   carry a fresh response token bound to the request id. *)
+fun clientMsg(body, bitstring, skey, reqid): bitstring [data].
+fun provMsg(body, bitstring, skey, reqid): bitstring [data].
+fun prvResp(rtoken, reqid): bitstring [data].
+fun cliResp(rtoken, reqid): bitstring [data].
+
+(* Enclave-owned destination policy, baked into the measured image. *)
+table policyTable(pname, dest, pubkey).
+
+event Quote(meas, pubkey, nonce).
+event Verified(meas, pubkey, nonce).
+event PlaintextReleased(body, pubkey, nonce, reqid).
+event EnclaveAcceptedBody(body, pubkey, nonce, reqid).
+event EnclaveResolved(pname, dest).
+event SentToProvider(body, dest, reqid).
+event ProviderReceived(body, dest, reqid).
+event ProviderSent(body, dest, reqid, rtoken).
+event ClientReceived(body, reqid, rtoken).
+
+(* ---- Queries.  Expected results are stated per query. ---- *)
+
+(* P1a (attestation agreement, injective): every sidecar verification of the
+   expected measurement over a key and nonce corresponds injectively to a
+   genuine in-enclave quote that bound the same key and nonce. Expected: true. *)
+query p: pubkey, n: nonce;
+  inj-event(Verified(goodMeas, p, n)) ==> inj-event(Quote(goodMeas, p, n)).
+
+(* P1b (release ordering): plaintext release is preceded by a verification of
+   the expected measurement binding the same key and nonce. Expected: true. *)
+query b: body, p: pubkey, n: nonce, q: reqid;
+  event(PlaintextReleased(b, p, n, q)) ==> event(Verified(goodMeas, p, n)).
+
+(* P1c (release ordering, injective; v1 Q2 strengthened): each release maps to
+   a distinct verification, so a replayed attestation cannot justify a second
+   release. Expected: true. *)
+query b: body, p: pubkey, n: nonce, q: reqid;
+  inj-event(PlaintextReleased(b, p, n, q)) ==> inj-event(Verified(goodMeas, p, n)).
+
+(* P2 (check-to-use, injective, honest body): when the enclave accepts the
+   honest body under a key, nonce, and request id, that exact body was released
+   by the sidecar under the same key, nonce, and request id, injectively. The
+   all-body version is intentionally NOT claimed: the enclave serves
+   attacker-owned client sessions by design. Expected: true. *)
+query p: pubkey, n: nonce, q: reqid;
+  inj-event(EnclaveAcceptedBody(secretBody, p, n, q))
+    ==> inj-event(PlaintextReleased(secretBody, p, n, q)).
+
+(* P3a (destination authority, honest body): the honest body reaches a provider
+   only after the enclave resolved a policy name inside its baked table; the
+   host cited a name, never a destination. Expected: true. *)
+query d: dest, pn: pname, q: reqid;
+  event(ProviderReceived(secretBody, d, q)) ==> event(EnclaveResolved(pn, d)).
+
+(* P3b (allowlist bound, honest body): any destination the honest body reaches
+   is one of the modeled policy table entries. Expected: true. *)
+query d: dest, q: reqid;
+  event(ProviderReceived(secretBody, d, q)) ==> d = dest1 || d = dest2.
+
+(* P3c (egress ordering, all bodies): every enclave dispatch, for any body, is
+   preceded by a policy resolution for that destination. Expected: true. *)
+query b: body, d: dest, pn: pname, q: reqid;
+  event(SentToProvider(b, d, q)) ==> event(EnclaveResolved(pn, d)).
+
+(* P4 (response provenance, honest body): a response the client accepts for the
+   honest body and request id was produced and received by a provider at an
+   allowlisted destination for the same body, request id, and token.
+   Expected: true. *)
+query q: reqid, r: rtoken;
+  event(ClientReceived(secretBody, q, r))
+    ==> (event(ProviderSent(secretBody, dest1, q, r)) && event(ProviderReceived(secretBody, dest1, q)))
+     || (event(ProviderSent(secretBody, dest2, q, r)) && event(ProviderReceived(secretBody, dest2, q))).
+
+(* P5a (body confidentiality): the host/network attacker never learns the
+   honest body, despite owning the control channel, the platform oracle, and
+   all networks. Expected: true (not attacker). *)
+query attacker(secretBody).
+
+(* P5b (metadata-only control channel, noninterference): host-observable
+   behavior is invariant under change of the body. Expected: true. *)
+noninterf secretBody.
+
+(* D1 (scope documentation, disclosure by design): the gateway credential IS
+   learned by the host; the single-operator deployment discloses it on the
+   control channel. Expected: false (attacker does obtain it). *)
+query attacker(gwCred).
+
+(* S1, S2 (sanity, non-vacuity): the honest pipeline completes, so the
+   correspondences above are not vacuously true. Expected: false, i.e. the
+   events are reachable. *)
+query b: body, q: reqid, r: rtoken; event(ClientReceived(b, q, r)).
+query b: body, d: dest, q: reqid; event(ProviderReceived(b, d, q)).
+
+(* ---- Roles ---- *)
+
+(* The verifying sidecar: fresh nonce, verify the platform signature, accept
+   only the expected measurement and its own nonce, then read an UNAUTHENTICATED
+   channel key from net and release the body encrypted to that key, tagged with
+   a fresh request id, and accept only a response bound to that request id. *)
+let Sidecar =
+  new n: nonce;
+  out(net, n);
+  in(net, doc: bitstring);
+  let attBody(=goodMeas, =n) = checksign(doc, spk(skPlatform)) in
+  in(net, pe: pubkey);
+  event Verified(goodMeas, pe, n);
+  new kc: skey;
+  new q: reqid;
+  event PlaintextReleased(secretBody, pe, n, q);
+  out(net, aenc(clientMsg(secretBody, gwCred, kc, q), pe));
+  in(net, encResp: bitstring);
+  let cliResp(rv, =q) = sdec(encResp, kc) in
+  event ClientReceived(secretBody, q, rv).
+
+(* The platform equally attests ANY other image the host loads, over an
+   attacker-chosen nonce. *)
+let PlatformOracle =
+  in(net, (m: meas, nr: nonce));
+  if m <> goodMeas then
+  out(net, sign(attBody(m, nr), skPlatform)).
+
+(* The enclave data plane: each session generates an ephemeral channel key and
+   the security module quotes the genuine measurement over the sidecar nonce.
+   The ephemeral public key is published separately, unauthenticated, on net.
+   Then accept a client body, ask the host to authorize using metadata and the
+   gateway credential only, resolve the host's policy NAME inside the baked
+   table, dispatch with a fresh provider session key, relay the matching
+   response back on the client session. *)
+let EnclaveSession =
+  in(net, nr: nonce);
+  new ske: privkey;
+  event Quote(goodMeas, pk(ske), nr);
+  out(net, sign(attBody(goodMeas, nr), skPlatform));
+  out(net, pk(ske));
+  in(net, c: bitstring);
+  let clientMsg(b, gc, kc, q) = adec(c, ske) in
+  event EnclaveAcceptedBody(b, pk(ske), nr, q);
+  out(hostctl, (pubMeta, gc));
+  in(hostctl, (pn: pname, cred: bitstring));
+  get policyTable(=pn, d, pkP) in
+  event EnclaveResolved(pn, d);
+  new ks: skey;
+  event SentToProvider(b, d, q);
+  out(wire, aenc(provMsg(b, cred, ks, q), pkP));
+  in(wire, er: bitstring);
+  let prvResp(rv, =q) = sdec(er, ks) in
+  out(net, senc(cliResp(rv, q), kc)).
+
+(* An honest provider at a fixed destination identity: answers with a fresh
+   response token bound to the request id, under the session key. *)
+let Provider(skP: privkey, d: dest) =
+  in(wire, x: bitstring);
+  let provMsg(b, cred, ks, q) = adec(x, skP) in
+  event ProviderReceived(b, d, q);
+  new rv: rtoken;
+  event ProviderSent(b, d, q, rv);
+  out(wire, senc(prvResp(rv, q), ks)).
+
+process
+  insert policyTable(name1, dest1, pk(skProv1));
+  insert policyTable(name2, dest2, pk(skProv2));
+  out(net, pk(skProv1));
+  out(net, pk(skProv2));
+  out(net, spk(skPlatform));
+  ( (!Sidecar) | (!EnclaveSession) | (!PlatformOracle)
+  | (!Provider(skProv1, dest1)) | (!Provider(skProv2, dest2)) )
